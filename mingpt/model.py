@@ -197,7 +197,10 @@ class GPT(nn.Module):
         transposed = ['attn.c_attn.weight', 'attn.c_proj.weight', 'mlp.c_fc.weight', 'mlp.c_proj.weight']
         # basically the openai checkpoints use a "Conv1D" module, but we only want to use a vanilla nn.Linear.
         # this means that we have to transpose these weights when we import them
-        assert len(keys) == len(sd)
+        # .attn.bias is minGPT's causal mask buffer; it is not present in HF checkpoints.
+        # Use a leading dot to avoid also matching attn.c_attn.bias (the real QKV bias).
+        sd_keys = [k for k in sd if not k.endswith('.attn.bias')]
+        assert len(keys) == len(sd_keys), f"HF keys: {len(keys)}, minGPT keys: {len(sd_keys)}"
         for k in keys:
             if any(k.endswith(w) for w in transposed):
                 # special treatment for the Conv1D weights we need to transpose
