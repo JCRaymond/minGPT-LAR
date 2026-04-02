@@ -8,3 +8,5 @@ __pycache__/
 *.dat
 *.pt
 *.npz
+CLAUDE.md
+minGPT.egg-info/
