@@ -36,13 +36,14 @@ model_type     = 'gpt2-medium'  # 24 layers, 345M params
 device         = 'cpu'  # GPU disabled; ROCm unstable on this hardware
 layer_a        = 6      # encoder outputs after this block (1-indexed -> hooks h[5])
 layer_b        = 18     # latent AR outputs after this block (1-indexed -> hooks h[17])
-lambda_penalty = 2e-4   # penalty weight; tune to keep lambda*penalty ~ ce_loss
+lambda_penalty = 1e-3   # penalty weight; tune to keep lambda*penalty ~ ce_loss
 block_size     = 1024   # shorter sequences → 4× less attention memory (scales as T²)
 batch_size     = 2      # CPU training with 24 GB RAM budget
 learning_rate  = 3e-5   # conservative LR for fine-tuning
 weight_decay   = 0.1
 betas          = (0.9, 0.95)
 max_iters      = 500
+epochs         = 4
 grad_norm_clip = 1.0
 log_interval   = 10
 ckpt_interval  = 100
@@ -138,60 +139,63 @@ def train():
     data_iter = iter(loader)
     t0 = time.time()
 
-    for iter_num in range(1, max_iters + 1):
-        try:
-            x, y = next(data_iter)
-        except StopIteration:
-            data_iter = iter(loader)
-            x, y = next(data_iter)
+    for epoch in range(1, epochs + 1):
+        print(f'Epoch: {epoch}')
+        ep_ckpt_path = os.path.join(_DIR, f'latent_ar_checkpoint-{epoch}.pt')
+        for iter_num in range(1, max_iters + 1):
+            try:
+                x, y = next(data_iter)
+            except StopIteration:
+                data_iter = iter(loader)
+                x, y = next(data_iter)
 
-        x, y = x.to(device), y.to(device)
+            x, y = x.to(device), y.to(device)
 
-        # Forward pass.  The hooks populate h_a_buf and h_b_buf as side effects.
-        logits, ce_loss = model(x, y)
+            # Forward pass.  The hooks populate h_a_buf and h_b_buf as side effects.
+            logits, ce_loss = model(x, y)
 
-        # Latent AR penalty.
-        # h_b[:, i, :] is the latent AR prediction at position i.
-        # h_a[:, i+1, :] is what the encoder actually produces at position i+1.
-        # Minimising their L2 distance trains the middle layers to be an
-        # autoregressor in latent space.
-        h_a = h_a_buf['act']  # (B, T, n_embd)
-        h_b = h_b_buf['act']  # (B, T, n_embd)
-        penalty = ((h_a[:, 1:, :] - h_b[:, :-1, :]) ** 2).sum(dim=-1).mean()
+            # Latent AR penalty.
+            # h_b[:, i, :] is the latent AR prediction at position i.
+            # h_a[:, i+1, :] is what the encoder actually produces at position i+1.
+            # Minimising their L2 distance trains the middle layers to be an
+            # autoregressor in latent space.
+            h_a = h_a_buf['act']  # (B, T, n_embd)
+            h_b = h_b_buf['act']  # (B, T, n_embd)
+            penalty = ((h_a[:, 1:, :] - h_b[:, :-1, :]) ** 2).sum(dim=-1).mean()
 
-        loss = ce_loss + lambda_penalty * penalty
+            loss = ce_loss + lambda_penalty * penalty
 
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_norm_clip)
-        optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_norm_clip)
+            optimizer.step()
 
-        if iter_num % log_interval == 0:
-            t1 = time.time()
-            ms_per_iter = (t1 - t0) / log_interval * 1000
-            t0 = t1
-            penalty_contrib = lambda_penalty * penalty.item()
-            ratio = penalty_contrib / (ce_loss.item() + 1e-8)
-            ratio_str = f" [penalty/ce ratio: {ratio:.2f}]"
-            if ratio > 10:
-                ratio_str += " <- consider reducing lambda_penalty"
-            elif ratio < 0.01:
-                ratio_str += " <- consider increasing lambda_penalty"
-            print(
-                f"iter {iter_num:6d} | "
-                f"loss {loss.item():.4f} | "
-                f"ce {ce_loss.item():.4f} | "
-                f"penalty {penalty.item():.4f} | "
-                f"{ms_per_iter:.0f}ms/iter"
-                + ratio_str
-            )
+            if iter_num % log_interval == 0:
+                t1 = time.time()
+                ms_per_iter = (t1 - t0) / log_interval * 1000
+                t0 = t1
+                penalty_contrib = lambda_penalty * penalty.item()
+                ratio = penalty_contrib / (ce_loss.item() + 1e-8)
+                ratio_str = f" [penalty/ce ratio: {ratio:.2f}]"
+                if ratio > 10:
+                    ratio_str += " <- consider reducing lambda_penalty"
+                elif ratio < 0.01:
+                    ratio_str += " <- consider increasing lambda_penalty"
+                print(
+                    f"iter {iter_num:6d} | "
+                    f"loss {loss.item():.4f} | "
+                    f"ce {ce_loss.item():.4f} | "
+                    f"penalty {penalty.item():.4f} | "
+                    f"{ms_per_iter:.0f}ms/iter"
+                    + ratio_str
+                )
 
-        if iter_num % ckpt_interval == 0:
-            torch.save(model.state_dict(), ckpt_path)
-            print(f"Checkpoint saved -> {ckpt_path}")
+            if iter_num % ckpt_interval == 0:
+                torch.save(model.state_dict(), ep_ckpt_path)
+                print(f"Checkpoint saved -> {ep_ckpt_path}")
 
-    torch.save(model.state_dict(), ckpt_path)
-    print(f"Training complete. Checkpoint: {ckpt_path}")
+    torch.save(model.state_dict(), ep_ckpt_path)
+    #print(f"Training complete. Checkpoint: {ckpt_path}")
 
     handle_a.remove()
     handle_b.remove()
