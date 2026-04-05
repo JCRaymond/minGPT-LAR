@@ -38,12 +38,12 @@ layer_a        = 6      # encoder outputs after this block (1-indexed -> hooks h
 layer_b        = 18     # latent AR outputs after this block (1-indexed -> hooks h[17])
 lambda_penalty = 1e-3   # penalty weight; tune to keep lambda*penalty ~ ce_loss
 block_size     = 1024   # shorter sequences → 4× less attention memory (scales as T²)
-batch_size     = 4 if device == 'cuda' else 2
+batch_size     = 12 if device == 'cuda' else 2
 learning_rate  = 3e-5   # conservative LR for fine-tuning
 weight_decay   = 0.1
 betas          = (0.9, 0.95)
-max_iters      = 500
-epochs         = 4
+max_iters      = 10000
+epochs         = 8
 grad_norm_clip = 1.0
 log_interval   = 10
 ckpt_interval  = 100
@@ -226,5 +226,6 @@ def generate_sample():
 
 
 if __name__ == '__main__':
+    print(f'Device: {device}')
     train()
     generate_sample()
