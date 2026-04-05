@@ -37,9 +37,9 @@ from projects.latent_ar.wiki_data import load_train_tokens
 _DIR = os.path.dirname(os.path.abspath(__file__))
 
 model_type    = 'gpt2-medium'   # 24 layers
-device        = 'cpu'
+device        = 'cuda' if torch.cuda.is_available() else 'cpu'
 seq_len       = 1024            # matches training block_size
-batch_size    = 2
+batch_size    = 4 if device == 'cuda' else 2
 save_interval = 500             # checkpoint every N batches
 log_interval  = 100
 
@@ -86,7 +86,8 @@ def make_hook(buf):
 def scan(mode):
     latent_ar_ckpt, checkpoint_path, plot_prefix = _run_paths(mode)
 
-    torch.set_num_threads(10)
+    if device == 'cpu':
+        torch.set_num_threads(10)
     set_seed(3407)
     tokens = load_train_tokens()
     n_tokens = len(tokens)

@@ -16,10 +16,11 @@ from projects.latent_ar.wiki_data import load_train_tokens
 _DIR = os.path.dirname(os.path.abspath(__file__))
 
 model_type  = 'gpt2-medium'
+device      = 'cuda' if torch.cuda.is_available() else 'cpu'
 layer_a     = 6
 layer_b     = 18
 n_batches   = 20
-batch_size  = 2
+batch_size  = 4 if device == 'cuda' else 2
 seq_len     = 1024
 ckpt_path   = os.path.join(_DIR, 'latent_ar_checkpoint.pt')
 
@@ -42,7 +43,7 @@ def measure(label, model, tokens):
             starts = rng.integers(0, len(tokens) - seq_len - 1, size=batch_size)
             x = torch.from_numpy(
                 np.stack([tokens[s:s+seq_len].astype(np.int64) for s in starts])
-            )
+            ).to(device)
             model(x)
             h_a = bufs[layer_a - 1]['act'].float()
             h_b = bufs[layer_b - 1]['act'].float()
@@ -74,13 +75,15 @@ if __name__ == '__main__':
     print(f"Layer pair: a={layer_a}, b={layer_b}")
 
     base = GPT.from_pretrained(model_type)
+    base.to(device)
     base.eval()
     measure('Base pretrained model', base, tokens)
     del base
 
     if os.path.exists(ckpt_path):
         lar = GPT.from_pretrained(model_type)
-        lar.load_state_dict(torch.load(ckpt_path, map_location='cpu', weights_only=True))
+        lar.load_state_dict(torch.load(ckpt_path, map_location=device, weights_only=True))
+        lar.to(device)
         lar.eval()
         measure('LAR checkpoint', lar, tokens)
     else:

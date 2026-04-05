@@ -28,7 +28,7 @@ _DIR = os.path.dirname(os.path.abspath(__file__))
 # Config
 
 model_type  = 'gpt2-medium'
-device      = 'cpu'
+device      = 'cuda' if torch.cuda.is_available() else 'cpu'
 layer_a     = 6
 layer_b     = 18
 block_size  = 256   # shorter than training for speed; scales attention as T²
@@ -62,7 +62,8 @@ def bypass_lar(model):
 
 
 def run(mode):
-    torch.set_num_threads(10)
+    if device == 'cpu':
+        torch.set_num_threads(10)
     set_seed(3407)
 
     tokens = load_train_tokens()
