@@ -244,7 +244,8 @@ def _report(plot_prefix, penalty_sum, cos_sum, pair_counts, total_pairs, n_layer
 
     safe_counts = np.where(pair_counts > 0, pair_counts, np.nan)
     means    = penalty_sum / safe_counts   # (n_layers, n_layers)
-    cos_mean = cos_sum     / total_pairs   # (n_layers, n_layers)
+    cos_mean    = cos_sum / total_pairs          # (n_layers, n_layers)
+    cos_sq_mean = cos_mean ** 2                  # squared for better resolution near 1
 
     print(f"\n{'='*62}")
     print(f"Layer pair scan — {total_pairs:,} position pairs accumulated")
@@ -281,34 +282,34 @@ def _report(plot_prefix, penalty_sum, cos_sum, pair_counts, total_pairs, n_layer
         mse, a, b = best_by_gap[gap]
         print(f"{gap:>4}  {a:>4}  {b:>4}  {mse:>14.6f}")
 
-    # Cosine similarity table
+    # Cosine² similarity table
     cos_pairs = [
-        (cos_mean[a, b], a + 1, b + 1, b - a)
+        (cos_sq_mean[a, b], a + 1, b + 1, b - a)
         for a in range(n_layers)
         for b in range(a + 1, n_layers)
     ]
-    cos_pairs.sort(reverse=True)   # higher cosine = more compatible
+    cos_pairs.sort(reverse=True)   # higher cos² = more compatible
 
     print(f"\n{'='*62}")
-    print(f"Cosine similarity  [ h_b[i] vs h_a[i+1] ]")
+    print(f"Cosine² similarity  [ h_b[i] vs h_a[i+1] ]")
     print(f"Higher = more directionally compatible as latent-AR split points")
     print(f"{'='*62}")
-    print(f"\n{'Rank':>4}  {'a':>4}  {'b':>4}  {'gap':>4}  {'cos sim':>10}")
+    print(f"\n{'Rank':>4}  {'a':>4}  {'b':>4}  {'gap':>4}  {'cos² sim':>10}")
     print("─" * 36)
-    for rank, (cos, a, b, gap) in enumerate(cos_pairs[:30], 1):
-        print(f"{rank:>4}  {a:>4}  {b:>4}  {gap:>4}  {cos:>10.6f}")
+    for rank, (cos_sq, a, b, gap) in enumerate(cos_pairs[:30], 1):
+        print(f"{rank:>4}  {a:>4}  {b:>4}  {gap:>4}  {cos_sq:>10.6f}")
 
     best_cos_by_gap = {}
-    for cos, a, b, gap in cos_pairs:
+    for cos_sq, a, b, gap in cos_pairs:
         if gap not in best_cos_by_gap:
-            best_cos_by_gap[gap] = (cos, a, b)
+            best_cos_by_gap[gap] = (cos_sq, a, b)
 
-    print(f"\nBest cosine pair per gap size:")
-    print(f"{'gap':>4}  {'a':>4}  {'b':>4}  {'cos sim':>10}")
+    print(f"\nBest cos² pair per gap size:")
+    print(f"{'gap':>4}  {'a':>4}  {'b':>4}  {'cos² sim':>10}")
     print("─" * 26)
     for gap in sorted(best_cos_by_gap):
-        cos, a, b = best_cos_by_gap[gap]
-        print(f"{gap:>4}  {a:>4}  {b:>4}  {cos:>10.6f}")
+        cos_sq, a, b = best_cos_by_gap[gap]
+        print(f"{gap:>4}  {a:>4}  {b:>4}  {cos_sq:>10.6f}")
 
     try:
         import matplotlib
@@ -318,7 +319,7 @@ def _report(plot_prefix, penalty_sum, cos_sum, pair_counts, total_pairs, n_layer
         from matplotlib.colors import LogNorm
 
         max_gap = n_layers - 1
-        gap_cmap = matplotlib.colormaps['viridis'].resampled(max_gap)
+        gap_cmap = matplotlib.colormaps['plasma'].resampled(max_gap)
         ticks = list(range(1, n_layers + 1))
 
         # --- L2 line plot (log scale) ----------------------------------------
@@ -371,17 +372,17 @@ def _report(plot_prefix, penalty_sum, cos_sum, pair_counts, total_pairs, n_layer
         plt.savefig(l2_heat_path, dpi=150)
         print(f"L2 heatmap saved to {l2_heat_path}")
 
-        # --- Cosine line plot ------------------------------------------------
+        # --- Cosine² line plot -----------------------------------------------
         cos_line_path = f'{plot_prefix}_cosine_lines.png'
         fig3, ax3 = plt.subplots(figsize=(13, 7))
         for gap in range(1, max_gap + 1):
             xs = [a + 1 for a in range(n_layers - gap)]
-            ys = [cos_mean[a, a + gap] for a in range(n_layers - gap)]
+            ys = [cos_sq_mean[a, a + gap] for a in range(n_layers - gap)]
             ax3.plot(xs, ys, color=gap_cmap(gap - 1), linewidth=1.2)
         ax3.set_xlabel('Encoder split layer  a  (1-indexed)', fontsize=12)
-        ax3.set_ylabel('Mean cosine similarity', fontsize=12)
+        ax3.set_ylabel('Mean cosine² similarity', fontsize=12)
         ax3.set_title(
-            f'Latent-AR cosine similarity by gap size — {model_type}\n'
+            f'Latent-AR cosine² similarity by gap size — {model_type}\n'
             f'{total_pairs:,} position pairs  |  higher = more compatible',
             fontsize=12)
         ax3.set_xticks(ticks)
@@ -392,38 +393,78 @@ def _report(plot_prefix, penalty_sum, cos_sum, pair_counts, total_pairs, n_layer
         plt.colorbar(sm3, ax=ax3).set_label('Gap  (b − a)', fontsize=11)
         plt.tight_layout()
         plt.savefig(cos_line_path, dpi=150)
-        print(f"Cosine line plot saved to {cos_line_path}")
+        print(f"Cosine² line plot saved to {cos_line_path}")
 
-        # --- Cosine heatmap --------------------------------------------------
+        # --- Cosine² heatmap -------------------------------------------------
         cos_heat_path = f'{plot_prefix}_cosine_heatmap.png'
         heat_cos = np.full((n_layers, n_layers), np.nan)
         for a in range(n_layers):
             for b in range(a + 1, n_layers):
                 if pair_counts[a, b] > 0:
-                    heat_cos[b, a] = cos_mean[a, b]
+                    heat_cos[b, a] = cos_sq_mean[a, b]
 
         fig4, ax4 = plt.subplots(figsize=(9, 8))
         im4 = ax4.imshow(heat_cos, origin='upper', aspect='equal',
-                         vmin=0, vmax=1, cmap='plasma')
+                         vmin=0, vmax=1, cmap='magma')
         ax4.set_xlabel('Encoder split layer  a  (1-indexed)', fontsize=12)
         ax4.set_ylabel('Latent-AR split layer  b  (1-indexed)', fontsize=12)
         ax4.set_xticks(range(n_layers)); ax4.set_xticklabels(ticks)
         ax4.set_yticks(range(n_layers)); ax4.set_yticklabels(ticks)
         ax4.set_title(
-            f'Latent-AR cosine similarity heatmap — {model_type}\n'
+            f'Latent-AR cosine² similarity heatmap — {model_type}\n'
             f'{total_pairs:,} position pairs  |  higher = more compatible',
             fontsize=12)
-        plt.colorbar(im4, ax=ax4).set_label('Mean cosine similarity', fontsize=11)
+        plt.colorbar(im4, ax=ax4).set_label('Mean cosine² similarity', fontsize=11)
         plt.tight_layout()
         plt.savefig(cos_heat_path, dpi=150)
-        print(f"Cosine heatmap saved to {cos_heat_path}")
+        print(f"Cosine² heatmap saved to {cos_heat_path}")
 
     except ImportError:
         print("\n(install matplotlib to generate a plot)")
 
 
-if __name__ == '__main__':
-    if len(sys.argv) != 2 or sys.argv[1] not in ('orig', 'lar'):
-        print("Usage: python -m projects.latent_ar.scan_layers [orig|lar]")
+def regen():
+    """Regenerate plots from all existing checkpoints without running a new scan."""
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+
+    runs = []
+
+    orig_ckpt = os.path.join(RESULTS_DIR, 'orig_checkpoint.npz')
+    if os.path.exists(orig_ckpt):
+        runs.append((orig_ckpt, os.path.join(RESULTS_DIR, 'orig')))
+
+    for entry in sorted(os.listdir(RESULTS_DIR)):
+        run_dir = os.path.join(RESULTS_DIR, entry)
+        if os.path.isdir(run_dir) and entry.startswith('layer_scan_lar_'):
+            ckpt = os.path.join(run_dir, 'checkpoint.npz')
+            if os.path.exists(ckpt):
+                runs.append((ckpt, os.path.join(run_dir, 'lar')))
+
+    if not runs:
+        print("No checkpoints found to regenerate.")
         sys.exit(1)
-    scan(sys.argv[1])
+
+    for ckpt_path, plot_prefix in runs:
+        print(f"\nRegenerating plots from {ckpt_path} -> {plot_prefix}_*.png")
+        ckpt = np.load(ckpt_path)
+        n_layers    = int(np.sqrt(ckpt['penalty_sum'].shape[0] * 2 + 0.25) + 0.5) \
+                      if ckpt['penalty_sum'].ndim == 1 \
+                      else ckpt['penalty_sum'].shape[0]
+        penalty_sum = ckpt['penalty_sum']
+        cos_sum     = ckpt['cos_sum'] if 'cos_sum' in ckpt \
+                      else np.zeros((n_layers, n_layers), dtype=np.float64)
+        pair_counts = ckpt['pair_counts'] if 'pair_counts' in ckpt \
+                      else np.full((n_layers, n_layers),
+                                   float(ckpt['total_pairs'].item()), dtype=np.float64)
+        total_pairs = int(ckpt['total_pairs'].item())
+        _report(plot_prefix, penalty_sum, cos_sum, pair_counts, total_pairs, n_layers)
+
+
+if __name__ == '__main__':
+    if len(sys.argv) != 2 or sys.argv[1] not in ('orig', 'lar', 'regen'):
+        print("Usage: python -m projects.latent_ar.scan_layers [orig|lar|regen]")
+        sys.exit(1)
+    if sys.argv[1] == 'regen':
+        regen()
+    else:
+        scan(sys.argv[1])
