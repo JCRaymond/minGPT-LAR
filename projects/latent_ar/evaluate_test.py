@@ -35,8 +35,8 @@ device      = 'cuda' if torch.cuda.is_available() else 'cpu'
 layer_a     = 6
 layer_b     = 18
 block_size  = 1024
-batch_size  = 4 if device == 'cuda' else 2
-n_batches   = 100
+batch_size  = 12
+n_batches   = 500
 ckpt_path   = os.path.join(_DIR, 'latent_ar_checkpoint.pt')
 
 
