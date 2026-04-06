@@ -66,9 +66,12 @@ def eval_ce(model, tokens, rng, ignore_last=False):
                 torch.from_numpy(tokens[s : s + block_size].astype(np.int64))
                 for s in starts
             ]).to(device)
-            y = x.clone()
             if ignore_last:
+                # shift targets left by 1: reconstruct the token that was actually encoded
+                y = torch.roll(x, -1, dims=1)
                 y[:, -1] = -1  # -1 is the sentinel for ignore_index in F.cross_entropy
+            else:
+                y = x
             _, ce = model(x, y)
             total += ce.item()
     return total / n_batches
