@@ -25,7 +25,6 @@ from torch.utils.data import Dataset, DataLoader
 from mingpt.model import GPT
 from mingpt.bpe import BPETokenizer
 from mingpt.utils import set_seed
-from projects.latent_ar.wiki_data import load_train_tokens
 
 # -----------------------------------------------------------------------------
 # Config
@@ -47,7 +46,9 @@ epochs         = 8
 grad_norm_clip = 1.0
 log_interval   = 10
 ckpt_interval  = 100
-ckpt_path = os.path.join(_DIR, 'latent_ar_checkpoint.pt')
+DATA_DIR       = '/root'
+ckpt_load_path = os.path.join(_DIR, 'latent_ar_checkpoint.pt')
+ckpt_save_dir  = DATA_DIR
 
 
 class TokenDataset(Dataset):
@@ -92,7 +93,9 @@ def train():
     set_seed(3407)
 
     # --- data ---
-    tokens = load_train_tokens()
+    n_tokens = int(np.load(os.path.join(DATA_DIR, 'wiki_tokens_train_meta.npy'))[0])
+    tokens   = np.memmap(os.path.join(DATA_DIR, 'wiki_tokens_train.dat'),
+                         dtype=np.int32, mode='r', shape=(n_tokens,))
     epoch_size = max_iters * batch_size  # one "epoch" = exactly one full training run
     dataset = TokenDataset(tokens, block_size, epoch_size)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
@@ -100,9 +103,9 @@ def train():
 
     # --- model ---
     model = GPT.from_pretrained(model_type)
-    if os.path.exists(ckpt_path):
-        print(f"Resuming from checkpoint: {ckpt_path}")
-        model.load_state_dict(torch.load(ckpt_path, map_location=device, weights_only=True))
+    if os.path.exists(ckpt_load_path):
+        print(f"Resuming from checkpoint: {ckpt_load_path}")
+        model.load_state_dict(torch.load(ckpt_load_path, map_location=device, weights_only=True))
     else:
         print("No checkpoint found — starting from pretrained weights.")
     model.to(device)
@@ -144,7 +147,7 @@ def train():
 
     for epoch in range(1, epochs + 1):
         print(f'Epoch: {epoch}')
-        ep_ckpt_path = os.path.join(_DIR, f'latent_ar_checkpoint-{epoch}.pt')
+        ep_ckpt_path = os.path.join(ckpt_save_dir, f'latent_ar_checkpoint-{epoch}.pt')
         for iter_num in range(1, max_iters + 1):
             try:
                 x, y = next(data_iter)
@@ -211,7 +214,7 @@ def generate_sample():
     """
     print("\n--- Generation sample (standard token AR) ---")
     model = GPT.from_pretrained(model_type)
-    model.load_state_dict(torch.load(ckpt_path, map_location=device, weights_only=True))
+    model.load_state_dict(torch.load(ckpt_load_path, map_location=device, weights_only=True))
     model.to(device)
     model.eval()
 
