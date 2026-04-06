@@ -1,13 +1,20 @@
 """
-Ablation: encoder-decoder autoencoder test.
+Ablation: encoder-decoder autoencoder tests.
 
-Bypasses the LAR layers (transformer.h[layer_a : layer_b]) by replacing them
-with nn.Identity, connecting the encoder output directly to the decoder input.
-Cross-entropy is measured between the input tokens and the output logits
-(reconstruction), not next-token prediction. No gradient updates.
+Two ablations are run back to back:
 
-A low reconstruction CE indicates the encoder (h[0:layer_a]) and decoder
-(h[layer_b:]) have developed complementary representations.
+  bypass — replaces LAR layers (h[layer_a:layer_b]) with nn.Identity, connecting
+           the encoder output directly to the decoder input. CE is measured as
+           reconstruction (target = input).
+
+  shift  — replaces LAR layers with an ideal oracle that shifts encoder
+           representations forward by 1 position (output[t] = encoder[t+1]),
+           which is exactly what a perfect LAR core would produce. The last
+           position is masked out of CE since it has no valid oracle value.
+
+If the model has successfully pushed all autoregressive logic into the LAR layers,
+both tests should yield similar CE. A large gap means the LAR core is still doing
+meaningful work that the encoder/decoder pair alone cannot replicate.
 """
 
 import argparse
@@ -39,7 +46,15 @@ ckpt_path   = os.path.join(_DIR, 'latent_ar_checkpoint.pt')
 
 # ---------------------------------------------------------------------------
 
-def eval_ce(model, tokens, rng):
+class ShiftLayer(nn.Module):
+    """Oracle LAR: output[t] = encoder[t+1], zeros at last position."""
+    def forward(self, x):
+        out = torch.zeros_like(x)
+        out[:, :-1, :] = x[:, 1:, :]
+        return out
+
+
+def eval_ce(model, tokens, rng, ignore_last=False):
     """Evaluate mean reconstruction CE over n_batches random chunks."""
     model.eval()
     max_start = len(tokens) - block_size
@@ -51,7 +66,10 @@ def eval_ce(model, tokens, rng):
                 torch.from_numpy(tokens[s : s + block_size].astype(np.int64))
                 for s in starts
             ]).to(device)
-            _, ce = model(x, x)  # target = input (reconstruction, not next-token)
+            y = x.clone()
+            if ignore_last:
+                y[:, -1] = -1  # -1 is the sentinel for ignore_index in F.cross_entropy
+            _, ce = model(x, y)
             total += ce.item()
     return total / n_batches
 
@@ -59,6 +77,20 @@ def eval_ce(model, tokens, rng):
 def bypass_lar(model):
     for i in range(layer_a, layer_b):
         model.transformer.h[i] = nn.Identity()
+
+
+def shift_lar(model):
+    model.transformer.h[layer_a] = ShiftLayer()
+    for i in range(layer_a + 1, layer_b):
+        model.transformer.h[i] = nn.Identity()
+
+
+def load_model(mode):
+    model = GPT.from_pretrained(model_type)
+    if mode == 'lar':
+        model.load_state_dict(torch.load(ckpt_path, map_location=device, weights_only=True))
+    model.to(device)
+    return model
 
 
 def run(mode):
@@ -71,17 +103,33 @@ def run(mode):
         f"Tokens: {len(tokens):,} | block_size={block_size}, "
         f"batch_size={batch_size}, n_batches={n_batches}"
     )
-    print(f"Bypassing h[{layer_a}:{layer_b}] ({layer_b - layer_a} of 24 blocks skipped)\n")
+    label = 'LAR checkpoint' if mode == 'lar' else 'base pretrained model'
+    print(f"Model: {label}")
+    print(f"LAR layers: h[{layer_a}:{layer_b}] ({layer_b - layer_a} blocks)\n")
 
-    print(f"Loading {'LAR checkpoint' if mode == 'lar' else 'base pretrained model'}...")
-    model = GPT.from_pretrained(model_type)
-    if mode == 'lar':
-        model.load_state_dict(torch.load(ckpt_path, map_location=device, weights_only=True))
-    model.to(device)
+    rng = np.random.default_rng(seed=42)
+
+    # --- bypass ---
+    print("Loading model (bypass)...")
+    model = load_model(mode)
     bypass_lar(model)
     t0 = time.time()
-    ce = eval_ce(model, tokens, np.random.default_rng(seed=42))
-    print(f"Ablated reconstruction CE ({mode}): {ce:.4f}  ({time.time()-t0:.1f}s)")
+    bypass_ce = eval_ce(model, tokens, rng, ignore_last=False)
+    print(f"Bypass CE:  {bypass_ce:.4f}  ({time.time()-t0:.1f}s)")
+    del model
+
+    rng = np.random.default_rng(seed=42)  # same batches for fair comparison
+
+    # --- shift ---
+    print("Loading model (shift)...")
+    model = load_model(mode)
+    shift_lar(model)
+    t0 = time.time()
+    shift_ce = eval_ce(model, tokens, rng, ignore_last=True)
+    print(f"Shift CE:   {shift_ce:.4f}  ({time.time()-t0:.1f}s)")
+    del model
+
+    print(f"\nDelta (shift - bypass): {shift_ce - bypass_ce:+.4f}")
 
 
 if __name__ == '__main__':
