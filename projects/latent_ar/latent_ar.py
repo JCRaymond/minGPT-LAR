@@ -36,13 +36,13 @@ model_type     = 'gpt2-medium'  # 24 layers, 345M params
 device         = 'cuda' if torch.cuda.is_available() else 'cpu'
 layer_a        = 6      # encoder outputs after this block (1-indexed -> hooks h[5])
 layer_b        = 18     # latent AR outputs after this block (1-indexed -> hooks h[17])
-lambda_penalty = 1e-3   # penalty weight; tune to keep lambda*penalty ~ ce_loss
+lambda_penalty = 2e-3   # penalty weight; tune to keep lambda*penalty ~ ce_loss
 block_size     = 1024   # shorter sequences → 4× less attention memory (scales as T²)
 batch_size     = 12 if device == 'cuda' else 2
 learning_rate  = 3e-5   # conservative LR for fine-tuning
 weight_decay   = 0.1
 betas          = (0.9, 0.95)
-max_iters      = 10000
+max_iters      = 1000
 epochs         = 8
 grad_norm_clip = 1.0
 log_interval   = 10

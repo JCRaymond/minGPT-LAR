@@ -10,3 +10,4 @@ __pycache__/
 *.npz
 CLAUDE.md
 minGPT.egg-info/
+projects/latent_ar/backups/
