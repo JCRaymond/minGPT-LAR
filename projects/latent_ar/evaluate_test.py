@@ -36,7 +36,7 @@ layer_a     = 6
 layer_b     = 18
 block_size  = 1024
 batch_size  = 12
-n_batches   = 500
+n_batches   = 100
 ckpt_path   = os.path.join(_DIR, 'latent_ar_checkpoint.pt')
 
 

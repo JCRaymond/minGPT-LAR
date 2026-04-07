@@ -1,0 +1,22 @@
+{
+  "results": {
+    "timestamp": "20260407_171808",
+    "ckpt_path": "/workspace/minGPT-LAR/projects/latent_ar/latent_ar_checkpoint.pt",
+    "config": {
+      "n_batches": 100,
+      "batch_size": 12,
+      "block_size": 1024,
+      "layer_a": 6,
+      "layer_b": 18
+    },
+    "lar_ce": 3.1015935468673708,
+    "lar_ppl": 22.23335295679109,
+    "norm_a": 48.01065494537354,
+    "norm_b": 47.43862117767334,
+    "l2": 4.387581181526184,
+    "bypass_ce": 3.39889208316803,
+    "shift_ce": 3.397042679786682,
+    "base_ce": 3.0926528859138487,
+    "base_ppl": 22.035458059965432
+  }
+}
