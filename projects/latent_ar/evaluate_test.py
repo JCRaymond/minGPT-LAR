@@ -218,7 +218,7 @@ def run(mode):
         print(f"New eval file: {json_path}")
 
     tokens = load_test_tokens()
-    rng = np.random.default_rng(seed=42)
+    rng = np.random.default_rng()
     batch_starts = sample_batches(tokens, rng)
 
     print(f"Test tokens: {len(tokens):,}")
