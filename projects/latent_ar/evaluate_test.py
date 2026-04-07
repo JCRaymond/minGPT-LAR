@@ -7,6 +7,8 @@ Metrics reported:
   shift ablation CE   — oracle-shifted encoder output fed to decoder (reconstruction,
                         last token masked); measures how much work the LAR core does
   L2 / magnitudes     — mean L2 distance between h_a and h_b, and vector magnitudes
+  mean bias ‖μ‖       — norm of the mean residual vector; near 0 means errors are unbiased
+                        (expressed as a fraction of mean L2 for scale-invariant interpretation)
   baseline delta      — CE difference vs. base pretrained model on the same batches
 
 Run from the repo root:
@@ -106,6 +108,9 @@ def eval_l2(model, tokens, batch_starts):
     handle_b = model.transformer.h[layer_b - 1].register_forward_hook(make_hook(h_b_buf))
 
     norms_a, norms_b, distances = [], [], []
+    residual_sum = None
+    n_positions  = 0
+
     with torch.no_grad():
         for starts in batch_starts:
             x = torch.from_numpy(
@@ -116,12 +121,23 @@ def eval_l2(model, tokens, batch_starts):
             h_b = h_b_buf['act'].float()
             norms_a.append(h_a.norm(dim=-1).mean().item())
             norms_b.append(h_b.norm(dim=-1).mean().item())
-            dist = ((h_a[:, 1:, :] - h_b[:, :-1, :]) ** 2).sum(dim=-1).sqrt().mean().item()
+            residuals = h_a[:, 1:, :] - h_b[:, :-1, :]   # (B, T-1, n_embd)
+            dist = residuals.pow(2).sum(dim=-1).sqrt().mean().item()
             distances.append(dist)
+            # accumulate sum of residuals for mean bias estimate
+            batch_sum = residuals.sum(dim=(0, 1)).cpu()   # (n_embd,)
+            residual_sum = batch_sum if residual_sum is None else residual_sum + batch_sum
+            n_positions += residuals.shape[0] * residuals.shape[1]
 
     handle_a.remove()
     handle_b.remove()
-    return np.mean(norms_a), np.mean(norms_b), np.mean(distances)
+
+    mean_residual     = residual_sum / n_positions        # (n_embd,)
+    mean_bias         = mean_residual.norm().item()
+    mean_l2           = float(np.mean(distances))
+    bias_frac         = mean_bias / mean_l2 if mean_l2 > 0 else float('nan')
+
+    return np.mean(norms_a), np.mean(norms_b), mean_l2, mean_bias, bias_frac
 
 
 def bypass_lar(model):
@@ -230,15 +246,18 @@ def run(mode):
     else:
         model = load_lar()
 
-    # --- LAR: L2 / magnitudes ---
+    # --- LAR: L2 / magnitudes / bias ---
     if not skip('l2'):
-        print("LAR — L2 distance & magnitudes...")
+        print("LAR — L2 distance, magnitudes & bias...")
         t0 = time.time()
-        norm_a, norm_b, l2 = eval_l2(model, tokens, batch_starts)
+        norm_a, norm_b, l2, mean_bias, bias_frac = eval_l2(model, tokens, batch_starts)
         save_result('norm_a', norm_a)
         save_result('norm_b', norm_b)
         save_result('l2', l2)
-        print(f"  norm_a: {norm_a:.2f}  norm_b: {norm_b:.2f}  L2: {l2:.2f}  ({time.time()-t0:.1f}s)")
+        save_result('mean_bias', mean_bias)
+        save_result('bias_frac', bias_frac)
+        print(f"  norm_a: {norm_a:.2f}  norm_b: {norm_b:.2f}  L2: {l2:.2f}"
+              f"  bias: {mean_bias:.4f} ({bias_frac:.2%} of L2)  ({time.time()-t0:.1f}s)")
     del model
 
     # --- LAR: bypass ablation ---
@@ -280,7 +299,8 @@ def run(mode):
     print(f"  CE delta vs base:               {results['lar_ce'] - results['base_ce']:+.4f}")
     print(f"  Perplexity      (LAR):          {results['lar_ppl']:.2f}")
     print(f"  Perplexity      (base):         {results['base_ppl']:.2f}")
-    print(f"  Mean L2 (h_a vs h_b):          {results['l2']:.2f}")
+    print(f"  Mean L2 (h_a vs h_b):          {results['l2']:.4f}")
+    print(f"  Mean bias ‖μ‖:                  {results['mean_bias']:.4f} ({results['bias_frac']:.2%} of L2)")
     print(f"  Mean magnitude  (layer {layer_a}):      {results['norm_a']:.2f}")
     print(f"  Mean magnitude  (layer {layer_b}):     {results['norm_b']:.2f}")
     print(f"  Bypass ablation CE:             {results['bypass_ce']:.4f}")
