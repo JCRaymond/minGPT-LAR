@@ -50,7 +50,8 @@ device         = 'cuda' if torch.cuda.is_available() else 'cpu'
 layer_a        = 6
 layer_b        = 18
 lambda_penalty = 8e-3
-lambda_adv     = 1e-3   # start conservative; tune up if adv/ce ratio < 0.01
+lambda_adv_target = 0.2   # start conservative; tune up if adv/ce ratio < 0.01
+lambda_adv_ramp = False
 block_size     = 1024
 batch_size     = 12 if device == 'cuda' else 2
 learning_rate  = 3e-5
@@ -59,10 +60,11 @@ betas          = (0.9, 0.95)
 max_iters      = 1000
 epochs         = 8
 grad_norm_clip = 1.0
-log_interval   = 10
+log_interval   = 1
 ckpt_interval  = 100
 disc_lr        = 1e-4
-n_critic       = 5     # discriminator updates per LLM update
+disc_betas     = (0.2, 0.999)
+n_critic       = 3    # discriminator updates per LLM update
 n_embd         = 1024
 DATA_DIR       = '/root'
 
@@ -170,7 +172,7 @@ def train():
         betas=betas,
     )
     llm_optimizer  = model.configure_optimizers(train_cfg)
-    disc_optimizer = torch.optim.Adam(discriminator.parameters(), lr=disc_lr)
+    disc_optimizer = torch.optim.Adam(discriminator.parameters(), lr=disc_lr, betas=disc_betas)
 
     # --- Training loop ---
     data_iter = iter(loader)
@@ -224,10 +226,15 @@ def train():
             #   (d_fake_gen - 1)²: push h_b toward looking real (LAR core → encoder dist.)
             #   d_real_gen²:       push h_a toward looking fake (encoder → LAR core dist.)
             # Equilibrium: D outputs ~0.5 for both; distributions are indistinguishable.
-            gen_adv_loss = (d_fake_gen - 1).pow(2).mean() + d_real_gen.pow(2).mean()
+            gen_adv_loss = (d_fake_gen - 1).pow(2).mean()# + d_real_gen.pow(2).mean()
 
             # LAR penalty — same as latent_ar.py
             penalty = ((h_a[:, 1:, :] - h_b[:, :-1, :]) ** 2).sum(dim=-1).mean()
+
+            lambda_adv = lambda_adv_target
+            if lambda_adv_ramp:
+                total_iter = (epoch-1)*max_iters + iter_num - 1
+                lambda_adv *= 1/(1 + np.exp(-0.02*(total_iter-300)))
 
             total_loss = ce_loss + lambda_penalty * penalty + lambda_adv * gen_adv_loss
             total_loss.backward()
@@ -243,7 +250,7 @@ def train():
                 t0 = t1
 
                 with torch.no_grad():
-                    disc_acc = ((d_real > 0.5) & (d_fake < 0.5)).float().mean().item()
+                    disc_acc = ((d_real > 0.5).float().mean().item() + (d_fake < 0.5).float().mean().item())/2
 
                 penalty_ratio = (lambda_penalty * penalty.item()) / (ce_loss.item() + 1e-8)
                 adv_ratio     = (lambda_adv * gen_adv_loss.item()) / (ce_loss.item() + 1e-8)
