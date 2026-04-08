@@ -61,7 +61,8 @@ epochs         = 8
 grad_norm_clip = 1.0
 log_interval   = 10
 ckpt_interval  = 100
-disc_lr        = 1e-3
+disc_lr        = 1e-4
+n_critic       = 5     # discriminator updates per LLM update
 n_embd         = 1024
 DATA_DIR       = '/root'
 
@@ -198,14 +199,14 @@ def train():
             h_a_flat = h_a.reshape(-1, n_embd)     # (B*T, n_embd)
             h_b_flat = h_b.reshape(-1, n_embd)
 
-            # --- Discriminator update (LSGAN critic loss) ---
-            # Detach so no gradients flow back into the LLM during this step.
-            disc_optimizer.zero_grad()
-            d_real = discriminator(h_a_flat.detach())   # (B*T, 1)
-            d_fake = discriminator(h_b_flat.detach())
-            disc_loss = (d_real - 1).pow(2).mean() + d_fake.pow(2).mean()
-            disc_loss.backward()
-            disc_optimizer.step()
+            # --- Discriminator update (n_critic steps on same activations) ---
+            for _ in range(n_critic):
+                disc_optimizer.zero_grad()
+                d_real = discriminator(h_a_flat.detach())   # (B*T, 1)
+                d_fake = discriminator(h_b_flat.detach())
+                disc_loss = (d_real - 1).pow(2).mean() + d_fake.pow(2).mean()
+                disc_loss.backward()
+                disc_optimizer.step()
 
             # --- LLM update (CE + L2 + bidirectional LSGAN generator loss) ---
             llm_optimizer.zero_grad(set_to_none=True)
