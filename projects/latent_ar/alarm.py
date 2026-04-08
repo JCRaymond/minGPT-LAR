@@ -61,13 +61,13 @@ epochs         = 8
 grad_norm_clip = 1.0
 log_interval   = 10
 ckpt_interval  = 100
-disc_lr        = 1e-4
+disc_lr        = 1e-3
 n_embd         = 1024
 DATA_DIR       = '/root'
 
 gen_ckpt_load_path  = os.path.join(_DIR, 'alarm_gen_checkpoint.pt')
 gen_ckpt_save_dir   = DATA_DIR
-disc_ckpt_load_path = os.path.join(DATA_DIR, 'alarm_disc_checkpoint.pt')
+disc_ckpt_load_path = os.path.join(_DIR, 'alarm_disc_checkpoint.pt')
 disc_ckpt_save_dir  = DATA_DIR
 
 
