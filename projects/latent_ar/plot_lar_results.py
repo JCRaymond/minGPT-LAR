@@ -61,25 +61,27 @@ def plot_rollout_fidelity(ax_kl, ax_agree, data):
     ax_agree.legend()
 
 
-def plot_trajectory_divergence(ax_l2, ax_frac, data):
-    steps    = np.arange(len(data['per_step']['l2']))
-    l2       = np.array(data['per_step']['l2'])
-    l2_frac  = np.array(data['per_step']['l2_frac'])
-    mag      = data['summary']['mean_magnitude']
+def plot_trajectory_divergence(ax_l2, ax_norms, data):
+    steps = np.arange(len(data['per_step']['l2']))
+    l2    = np.array(data['per_step']['l2'])
+    mag   = data['summary']['mean_magnitude']
 
     ax_l2.plot(steps, l2, alpha=0.25, color='firebrick', linewidth=0.8)
     ax_l2.plot(steps, smooth(l2), color='firebrick', linewidth=1.8, label='L2 distance')
-    ax_l2.axhline(mag, color='grey', linestyle='--', linewidth=1.0, label=f'Mean magnitude ({mag:.1f})')
+    ax_l2.axhline(mag, color='grey', linestyle='--', linewidth=1.0, label=f'Mean h_a magnitude ({mag:.1f})')
     ax_l2.set_ylabel('L2 distance')
     ax_l2.set_title('Latent Trajectory Divergence — L2')
     ax_l2.legend()
 
-    ax_frac.plot(steps, l2_frac, alpha=0.25, color='purple', linewidth=0.8)
-    ax_frac.plot(steps, smooth(l2_frac), color='purple', linewidth=1.8, label='L2 / magnitude')
-    ax_frac.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f'{y:.0%}'))
-    ax_frac.set_ylabel('L2 / mean magnitude')
-    ax_frac.set_title('Latent Trajectory Divergence — Normalised')
-    ax_frac.legend()
+    pred_norm = np.array(data['per_step']['pred_norm'])
+    gt_norm   = np.array(data['per_step']['gt_norm'])
+    ax_norms.plot(steps, pred_norm, alpha=0.25, color='firebrick', linewidth=0.8)
+    ax_norms.plot(steps, smooth(pred_norm), color='firebrick', linewidth=1.8, label='Predicted (h_b) norm')
+    ax_norms.plot(steps, gt_norm, alpha=0.25, color='steelblue', linewidth=0.8)
+    ax_norms.plot(steps, smooth(gt_norm), color='steelblue', linewidth=1.8, label='Ground truth (h_a) norm')
+    ax_norms.set_ylabel('Vector norm')
+    ax_norms.set_title('Latent Trajectory — Vector Norms')
+    ax_norms.legend()
 
 
 def plot_rollout_ce(ax, data):

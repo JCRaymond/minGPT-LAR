@@ -75,7 +75,7 @@ LAR_RESULTS_DIR = os.path.join(_DIR, 'lar_results')
 # Shared rollout config (applies to all metrics)
 PROMPT_LEN   = 128
 GEN_STEPS    = 896   # prompt + gen_steps = 1024 (full context)
-N_SEQUENCES  = 20
+N_SEQUENCES  = 30
 
 
 # ---------------------------------------------------------------------------
@@ -128,56 +128,56 @@ def rollout_fidelity(model, tokens):
     """
     rng       = np.random.default_rng(seed=42)
     max_start = len(tokens) - PROMPT_LEN - GEN_STEPS - 1
-    kl_sum    = np.zeros(GEN_STEPS)
-    agree_sum = np.zeros(GEN_STEPS)
+    starts    = rng.integers(0, max_start, size=N_SEQUENCES)
 
     with torch.no_grad():
-        for seq_idx in range(N_SEQUENCES):
-            start = int(rng.integers(0, max_start))
-            seq = torch.from_numpy(
-                tokens[start : start + PROMPT_LEN + GEN_STEPS].astype(np.int64)
-            ).unsqueeze(0).to(device)   # (1, prompt_len + gen_steps)
+        seq = torch.from_numpy(
+            np.stack([tokens[s : s + PROMPT_LEN + GEN_STEPS].astype(np.int64) for s in starts])
+        ).to(device)   # (N, PROMPT_LEN + GEN_STEPS)
 
-            # --- Standard AR (teacher-forced) ---
-            # logits[t] predicts token t+1; relevant slice is
-            # logits[prompt_len .. prompt_len+gen_steps-1]
-            ar_logits, _ = model(seq)   # (1, prompt_len+gen_steps, vocab)
-            ar_probs = F.softmax(
-                ar_logits[0, PROMPT_LEN : PROMPT_LEN + GEN_STEPS, :],
-                dim=-1,
-            )   # (gen_steps, vocab)
+        # --- Standard AR (teacher-forced) ---
+        ar_logits, _ = model(seq)   # (N, PROMPT_LEN + GEN_STEPS, vocab)
+        ar_probs = F.softmax(
+            ar_logits[:, PROMPT_LEN : PROMPT_LEN + GEN_STEPS, :], dim=-1,
+        )   # (N, GEN_STEPS, vocab)
+        del ar_logits
 
-            # --- LAR rollout ---
-            latents = run_encoder(model, seq[:, :PROMPT_LEN])  # (1, prompt_len, n_embd)
+        # --- LAR rollout ---
+        h_a_prompt = run_encoder(model, seq[:, :PROMPT_LEN])  # (N, PROMPT_LEN, n_embd)
+        h_b_prompt = run_lar_core(model, h_a_prompt)           # (N, PROMPT_LEN, n_embd)
 
-            for step in range(GEN_STEPS):
-                lar_out    = run_lar_core(model, latents)               # (1, T, n_embd)
-                new_latent = lar_out[:, -1:, :]                         # (1, 1, n_embd)
-                latents    = torch.cat([latents, new_latent], dim=1)    # (1, T+1, n_embd)
+        # Pre-seed lar_latents with h_b[K-1] at position K so that step 0 produces
+        # h_b[K] ≈ h_a[K+1] — matching what the decoder expects at position K.
+        lar_latents = torch.cat([h_a_prompt, h_b_prompt[:, -1:, :]], dim=1)  # (N, PROMPT_LEN+1, n_embd)
+        dec_latents = h_b_prompt   # decoder uses h_b for prompt positions; generated positions appended below
 
-            # Decode once: causal attention means logits[t] is identical to what
-            # we'd get decoding latents[:t+1] alone, so all steps are covered.
-            logits = run_decoder(model, latents)   # (1, prompt_len + gen_steps, vocab)
-            lar_probs = F.softmax(
-                logits[0, PROMPT_LEN : PROMPT_LEN + GEN_STEPS, :],
-                dim=-1,
-            )   # (gen_steps, vocab)
+        log_every = max(1, GEN_STEPS // 4)
+        for step in range(GEN_STEPS):
+            lar_out    = run_lar_core(model, lar_latents)
+            new_latent = lar_out[:, -1:, :]   # h_b[PROMPT_LEN+step] ≈ h_a[PROMPT_LEN+step+1]
+            lar_latents = torch.cat([lar_latents, new_latent], dim=1)
+            dec_latents = torch.cat([dec_latents, new_latent], dim=1)
+            if (step + 1) % log_every == 0:
+                print(f"  [step {step+1}/{GEN_STEPS}]")
 
-            for step in range(GEN_STEPS):
-                ar_probs_step  = ar_probs[step]
-                lar_probs_step = lar_probs[step]
+        # dec_latents: (N, PROMPT_LEN + GEN_STEPS, n_embd)
+        # dec_latents[K+s] = h_b[K+s] ≈ h_a[K+s+1] — correct decoder input at position K+s.
+        # Decode once: causal attention means logits[t] is identical to what
+        # we'd get decoding dec_latents[:t+1] alone, so all steps are covered.
+        lar_logits = run_decoder(model, dec_latents)   # (N, PROMPT_LEN + GEN_STEPS, vocab)
+        lar_probs = F.softmax(
+            lar_logits[:, PROMPT_LEN : PROMPT_LEN + GEN_STEPS, :], dim=-1,
+        )   # (N, GEN_STEPS, vocab)
+        del lar_logits
 
-                kl = (ar_probs_step * (ar_probs_step.clamp(min=1e-10).log()
-                                       - lar_probs_step.clamp(min=1e-10).log())).sum()
-                kl_sum[step]    += kl.item()
-                agree_sum[step] += (ar_probs_step.argmax() == lar_probs_step.argmax()).float().item()
+        kl = (ar_probs * (ar_probs.clamp(min=1e-10).log()
+                          - lar_probs.clamp(min=1e-10).log())).sum(dim=-1)  # (N, GEN_STEPS)
+        agree = (ar_probs.argmax(dim=-1) == lar_probs.argmax(dim=-1)).float()  # (N, GEN_STEPS)
 
-            if (seq_idx + 1) % 5 == 0:
-                print(f"  [{seq_idx+1}/{N_SEQUENCES}]  "
-                      f"mean KL so far: {kl_sum.mean() / (seq_idx+1):.4f}  "
-                      f"mean agreement: {agree_sum.mean() / (seq_idx+1):.2%}")
+        kl_per_step    = kl.mean(dim=0).cpu().numpy()     # (GEN_STEPS,)
+        agree_per_step = agree.mean(dim=0).cpu().numpy()  # (GEN_STEPS,)
 
-    return kl_sum / N_SEQUENCES, agree_sum / N_SEQUENCES
+    return kl_per_step, agree_per_step
 
 
 # ---------------------------------------------------------------------------
@@ -195,58 +195,63 @@ def latent_rollout_ce(model, tokens):
         ce_per_step      (GEN_STEPS,) — mean CE at each rollout position (LAR)
         base_ce_per_step (GEN_STEPS,) — mean CE at each rollout position (standard AR)
     """
-    rng         = np.random.default_rng(seed=42)
-    max_start   = len(tokens) - PROMPT_LEN - GEN_STEPS - 1
-    ce_sum      = np.zeros(GEN_STEPS)
-    base_ce_sum = np.zeros(GEN_STEPS)
+    rng       = np.random.default_rng(seed=42)
+    max_start = len(tokens) - PROMPT_LEN - GEN_STEPS - 1
+    starts    = rng.integers(0, max_start, size=N_SEQUENCES)
 
     with torch.no_grad():
-        for seq_idx in range(N_SEQUENCES):
-            start = int(rng.integers(0, max_start))
-            # Load prompt + gen_steps tokens as input, +1 for the final target
-            seq = torch.from_numpy(
-                tokens[start : start + PROMPT_LEN + GEN_STEPS + 1].astype(np.int64)
-            ).unsqueeze(0).to(device)   # (1, K + gen_steps + 1)
+        # Load prompt + gen_steps + 1 tokens per sequence
+        seq = torch.from_numpy(
+            np.stack([tokens[s : s + PROMPT_LEN + GEN_STEPS + 1].astype(np.int64) for s in starts])
+        ).to(device)   # (N, PROMPT_LEN + GEN_STEPS + 1)
 
-            # targets: tokens K+1 .. K+gen_steps (ground truth for each rollout position)
-            targets = seq[0, PROMPT_LEN + 1 : PROMPT_LEN + 1 + GEN_STEPS]
+        # targets: tokens PROMPT_LEN+1 .. PROMPT_LEN+GEN_STEPS for each sequence
+        targets = seq[:, PROMPT_LEN + 1 : PROMPT_LEN + 1 + GEN_STEPS]   # (N, GEN_STEPS)
 
-            # --- Standard AR baseline (teacher-forced) ---
-            # Run full model on K+gen_steps tokens; evaluate at positions K..K+gen_steps-1
-            base_logits, _ = model(seq[:, : PROMPT_LEN + GEN_STEPS])
-            base_ces = F.cross_entropy(
-                base_logits[0, PROMPT_LEN : PROMPT_LEN + GEN_STEPS, :],
-                targets,
-                reduction='none',
-            ).cpu().numpy()   # (gen_steps,)
-            base_ce_sum += base_ces
+        # --- Standard AR baseline (teacher-forced) ---
+        base_logits, _ = model(seq[:, : PROMPT_LEN + GEN_STEPS])   # (N, PROMPT_LEN+GEN_STEPS, vocab)
+        base_ce_per_step = F.cross_entropy(
+            base_logits[:, PROMPT_LEN : PROMPT_LEN + GEN_STEPS, :].reshape(-1, base_logits.shape[-1]),
+            targets.reshape(-1),
+            reduction='none',
+        ).reshape(N_SEQUENCES, GEN_STEPS).mean(dim=0).cpu().numpy()   # (GEN_STEPS,)
+        del base_logits
 
-            # --- LAR rollout ---
-            latents = run_encoder(model, seq[:, :PROMPT_LEN])  # (1, K, n_embd)
+        # --- LAR rollout ---
+        h_a_prompt = run_encoder(model, seq[:, :PROMPT_LEN])  # (N, PROMPT_LEN, n_embd)
+        h_b_prompt = run_lar_core(model, h_a_prompt)           # (N, PROMPT_LEN, n_embd)
 
-            for step in range(GEN_STEPS):
-                lar_out    = run_lar_core(model, latents)
-                new_latent = lar_out[:, -1:, :]
-                latents    = torch.cat([latents, new_latent], dim=1)
+        # Pre-seed lar_latents with h_b[K-1] at position K so that step 0 produces
+        # h_b[K] ≈ h_a[K+1] — matching what the decoder expects at position K.
+        lar_latents = torch.cat([h_a_prompt, h_b_prompt[:, -1:, :]], dim=1)  # (N, PROMPT_LEN+1, n_embd)
+        dec_latents = h_b_prompt   # decoder uses h_b for prompt positions; generated positions appended below
 
-            # latents: (1, K + gen_steps, n_embd)
-            # Decode once; evaluate CE at positions K..K+gen_steps-1
-            logits = run_decoder(model, latents)
-            ces = F.cross_entropy(
-                logits[0, PROMPT_LEN : PROMPT_LEN + GEN_STEPS, :],
-                targets,
-                reduction='none',
-            ).cpu().numpy()   # (gen_steps,)
-            ce_sum += ces
+        log_every = max(1, GEN_STEPS // 4)
+        for step in range(GEN_STEPS):
+            lar_out    = run_lar_core(model, lar_latents)
+            new_latent = lar_out[:, -1:, :]   # h_b[PROMPT_LEN+step] ≈ h_a[PROMPT_LEN+step+1]
+            lar_latents = torch.cat([lar_latents, new_latent], dim=1)
+            dec_latents = torch.cat([dec_latents, new_latent], dim=1)
+            if (step + 1) % log_every == 0:
+                print(f"  [step {step+1}/{GEN_STEPS}]")
 
-            if (seq_idx + 1) % 5 == 0:
-                mean_ce      = ce_sum.mean()      / (seq_idx + 1)
-                mean_base_ce = base_ce_sum.mean() / (seq_idx + 1)
-                print(f"  [{seq_idx+1}/{N_SEQUENCES}]  "
-                      f"mean CE: {mean_ce:.4f}  baseline: {mean_base_ce:.4f}  "
-                      f"delta: {mean_ce - mean_base_ce:+.4f}")
+        # dec_latents: (N, PROMPT_LEN + GEN_STEPS, n_embd)
+        # dec_latents[K+s] = h_b[K+s] ≈ h_a[K+s+1] — correct decoder input at position K+s.
+        # Decode once; evaluate CE at positions PROMPT_LEN..PROMPT_LEN+GEN_STEPS-1
+        lar_logits = run_decoder(model, dec_latents)   # (N, PROMPT_LEN + GEN_STEPS, vocab)
+        ce_per_step = F.cross_entropy(
+            lar_logits[:, PROMPT_LEN : PROMPT_LEN + GEN_STEPS, :].reshape(-1, lar_logits.shape[-1]),
+            targets.reshape(-1),
+            reduction='none',
+        ).reshape(N_SEQUENCES, GEN_STEPS).mean(dim=0).cpu().numpy()   # (GEN_STEPS,)
+        del lar_logits
 
-    return ce_sum / N_SEQUENCES, base_ce_sum / N_SEQUENCES
+    mean_ce      = ce_per_step.mean()
+    mean_base_ce = base_ce_per_step.mean()
+    print(f"  mean CE: {mean_ce:.4f}  baseline: {mean_base_ce:.4f}  "
+          f"delta: {mean_ce - mean_base_ce:+.4f}")
+
+    return ce_per_step, base_ce_per_step
 
 
 # ---------------------------------------------------------------------------
@@ -267,42 +272,49 @@ def latent_trajectory_divergence(model, tokens):
         l2_per_step   (GEN_STEPS,) — mean L2 divergence at each rollout step
         mean_magnitude             — mean encoder vector magnitude (for normalisation)
     """
-    rng          = np.random.default_rng(seed=42)
-    max_start    = len(tokens) - PROMPT_LEN - GEN_STEPS - 1
-    l2_sum       = np.zeros(GEN_STEPS)
-    mag_sum      = 0.0
+    rng       = np.random.default_rng(seed=42)
+    max_start = len(tokens) - PROMPT_LEN - GEN_STEPS - 1
+    starts    = rng.integers(0, max_start, size=N_SEQUENCES)
+    l2_sum        = np.zeros(GEN_STEPS)
+    pred_norm_sum = np.zeros(GEN_STEPS)
+    gt_norm_sum   = np.zeros(GEN_STEPS)
 
     with torch.no_grad():
-        for seq_idx in range(N_SEQUENCES):
-            start = int(rng.integers(0, max_start))
-            seq = torch.from_numpy(
-                tokens[start : start + PROMPT_LEN + GEN_STEPS].astype(np.int64)
-            ).unsqueeze(0).to(device)   # (1, K + gen_steps)
+        seq = torch.from_numpy(
+            np.stack([tokens[s : s + PROMPT_LEN + GEN_STEPS].astype(np.int64) for s in starts])
+        ).to(device)   # (N, PROMPT_LEN + GEN_STEPS)
 
-            # Ground-truth latent trajectory from the encoder
-            ground_truth = run_encoder(model, seq)   # (1, K + gen_steps, n_embd)
-            mag_sum += ground_truth.float().norm(dim=-1).mean().item()
+        # Ground-truth latent trajectory from the encoder
+        ground_truth   = run_encoder(model, seq)   # (N, PROMPT_LEN + GEN_STEPS, n_embd)
+        mean_magnitude = ground_truth.float().norm(dim=-1).mean().item()
 
-            # Seed rollout with real encoder outputs for the prompt
-            latents = ground_truth[:, :PROMPT_LEN, :]
+        # Seed rollout with real encoder outputs for the prompt
+        latents = ground_truth[:, :PROMPT_LEN, :]   # (N, PROMPT_LEN, n_embd)
 
-            for step in range(GEN_STEPS):
-                lar_out   = run_lar_core(model, latents)
-                predicted = lar_out[:, -1:, :]                              # (1, 1, n_embd)
-                gt        = ground_truth[:, PROMPT_LEN + step : PROMPT_LEN + step + 1, :]
+        log_every = max(1, GEN_STEPS // 4)
+        for step in range(GEN_STEPS):
+            lar_out   = run_lar_core(model, latents)
+            predicted = lar_out[:, -1:, :]   # (N, 1, n_embd)
+            gt        = ground_truth[:, PROMPT_LEN + step : PROMPT_LEN + step + 1, :]
 
-                l2 = (predicted.float() - gt.float()).pow(2).sum(dim=-1).sqrt().item()
-                l2_sum[step] += l2
+            pred_f = predicted.float()
+            gt_f   = gt.float()
 
-                latents = torch.cat([latents, predicted], dim=1)
+            l2 = (pred_f - gt_f).pow(2).sum(dim=-1).sqrt()   # (N, 1)
+            l2_sum[step]        += l2.sum().item()
+            pred_norm_sum[step] += pred_f.norm(dim=-1).sum().item()
+            gt_norm_sum[step]   += gt_f.norm(dim=-1).sum().item()
 
-            if (seq_idx + 1) % 5 == 0:
-                mean_l2 = l2_sum.mean() / (seq_idx + 1)
-                print(f"  [{seq_idx+1}/{N_SEQUENCES}]  mean L2 so far: {mean_l2:.4f}")
+            latents = torch.cat([latents, predicted], dim=1)
 
-    l2_per_step    = l2_sum / N_SEQUENCES
-    mean_magnitude = mag_sum / N_SEQUENCES
-    return l2_per_step, mean_magnitude
+            if (step + 1) % log_every == 0:
+                mean_l2 = l2_sum[:step + 1].mean() / N_SEQUENCES
+                print(f"  [step {step+1}/{GEN_STEPS}]  mean L2 so far: {mean_l2:.4f}")
+
+    l2_per_step        = l2_sum        / N_SEQUENCES
+    pred_norm_per_step = pred_norm_sum / N_SEQUENCES
+    gt_norm_per_step   = gt_norm_sum   / N_SEQUENCES
+    return l2_per_step, mean_magnitude, pred_norm_per_step, gt_norm_per_step
 
 
 # ---------------------------------------------------------------------------
@@ -366,7 +378,8 @@ def run():
     print(f"prompt_len={PROMPT_LEN}, gen_steps={GEN_STEPS}, "
           f"n_sequences={N_SEQUENCES}\n")
     t0 = time.time()
-    l2_per_step, mean_magnitude = latent_trajectory_divergence(model, tokens)
+    l2_per_step, mean_magnitude, pred_norm_per_step, gt_norm_per_step = \
+        latent_trajectory_divergence(model, tokens)
     elapsed = time.time() - t0
 
     mean_l2       = float(l2_per_step.mean())
@@ -390,16 +403,20 @@ def run():
             'layer_b':     layer_b,
         },
         'summary': {
-            'mean_l2':        mean_l2,
-            'l2_step0':       l2_step0,
-            'l2_final':       l2_final,
-            'mean_magnitude': mean_magnitude,
-            'frac_step0':     frac_step0,
-            'frac_final':     frac_final,
+            'mean_l2':             mean_l2,
+            'l2_step0':            l2_step0,
+            'l2_final':            l2_final,
+            'mean_magnitude':      mean_magnitude,
+            'frac_step0':          frac_step0,
+            'frac_final':          frac_final,
+            'mean_pred_norm':      float(pred_norm_per_step.mean()),
+            'mean_gt_norm':        float(gt_norm_per_step.mean()),
         },
         'per_step': {
-            'l2':      l2_per_step.tolist(),
-            'l2_frac': (l2_per_step / mean_magnitude).tolist(),
+            'l2':        l2_per_step.tolist(),
+            'l2_frac':   (l2_per_step / mean_magnitude).tolist(),
+            'pred_norm': pred_norm_per_step.tolist(),
+            'gt_norm':   gt_norm_per_step.tolist(),
         },
     })
 
