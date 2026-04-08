@@ -42,19 +42,27 @@ def smooth(arr, window=20):
     return np.convolve(arr, kernel, mode='same')
 
 
+def _prompt_vline(ax, prompt_len):
+    ax.axvline(prompt_len, color='black', linestyle='--', linewidth=0.9, alpha=0.5,
+               label=f'Prompt end ({prompt_len})')
+
+
 def plot_rollout_fidelity(ax_kl, ax_agree, data):
-    steps  = np.arange(len(data['per_step']['kl']))
-    kl     = np.array(data['per_step']['kl'])
-    agree  = np.array(data['per_step']['agree'])
+    steps      = np.arange(len(data['per_step']['kl']))
+    kl         = np.array(data['per_step']['kl'])
+    agree      = np.array(data['per_step']['agree'])
+    prompt_len = data['config']['prompt_len']
 
     ax_kl.plot(steps, kl, alpha=0.25, color='steelblue', linewidth=0.8)
     ax_kl.plot(steps, smooth(kl), color='steelblue', linewidth=1.8, label='KL(AR||LAR)')
+    _prompt_vline(ax_kl, prompt_len)
     ax_kl.set_ylabel('KL divergence')
     ax_kl.set_title('Rollout Fidelity — KL(AR||LAR)')
     ax_kl.legend()
 
     ax_agree.plot(steps, agree, alpha=0.25, color='darkorange', linewidth=0.8)
     ax_agree.plot(steps, smooth(agree), color='darkorange', linewidth=1.8, label='Top-1 agreement')
+    _prompt_vline(ax_agree, prompt_len)
     ax_agree.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f'{y:.0%}'))
     ax_agree.set_ylabel('Agreement rate')
     ax_agree.set_title('Rollout Fidelity — Top-1 Agreement')
@@ -85,15 +93,17 @@ def plot_trajectory_divergence(ax_l2, ax_norms, data):
 
 
 def plot_rollout_ce(ax, data):
-    steps    = np.arange(len(data['per_step']['ce']))
-    ce       = np.array(data['per_step']['ce'])
-    base_ce  = np.array(data['per_step']['base_ce'])
-    delta    = ce - base_ce
+    steps      = np.arange(len(data['per_step']['ce']))
+    ce         = np.array(data['per_step']['ce'])
+    base_ce    = np.array(data['per_step']['base_ce'])
+    delta      = ce - base_ce
+    prompt_len = data['config']['prompt_len']
 
     ax.plot(steps, base_ce, alpha=0.2, color='steelblue', linewidth=0.8)
     ax.plot(steps, smooth(base_ce), color='steelblue', linewidth=1.8, label='Baseline CE (AR)')
     ax.plot(steps, ce, alpha=0.2, color='firebrick', linewidth=0.8)
     ax.plot(steps, smooth(ce), color='firebrick', linewidth=1.8, label='LAR rollout CE')
+    _prompt_vline(ax, prompt_len)
 
     ax2 = ax.twinx()
     ax2.plot(steps, delta, alpha=0.15, color='darkorange', linewidth=0.8)

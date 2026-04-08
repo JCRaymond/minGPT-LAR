@@ -93,7 +93,7 @@ def train():
     model = GPT.from_pretrained(model_type)
     model.load_state_dict(torch.load(gen_ckpt_path, map_location=device, weights_only=True))
     model.to(device)
-    model.eval()
+    model.train()   # must match alarm.py — discriminator must learn train-mode (dropout) activation statistics
 
     h_a_buf, h_b_buf = {}, {}
     handle_a = model.transformer.h[layer_a - 1].register_forward_hook(make_hook(h_a_buf))

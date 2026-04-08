@@ -179,14 +179,15 @@ def rollout_fidelity(model, tokens):
         hidden_lar = run_decoder_hidden(model, dec_latents)   # (N, PROMPT_LEN+GEN_STEPS, n_embd)
         del dec_latents, lar_latents
 
-        # Apply lm_head in DECODE_CHUNK-position chunks to avoid materialising the
-        # full (N, GEN_STEPS, vocab) tensors for both AR and LAR simultaneously.
+        # Apply lm_head in DECODE_CHUNK-position chunks, covering prompt + generated.
+        # Prompt positions (0..PROMPT_LEN-1) use identical decoder inputs for AR and LAR,
+        # so KL should be ≈0 and agreement ≈100% there — a built-in sanity check.
         kl_chunks    = []
         agree_chunks = []
-        for c in range(0, GEN_STEPS, DECODE_CHUNK):
-            c_end = min(c + DECODE_CHUNK, GEN_STEPS)
-            ar_logits_c  = model.lm_head(hidden_ar[:, PROMPT_LEN + c : PROMPT_LEN + c_end, :])
-            lar_logits_c = model.lm_head(hidden_lar[:, PROMPT_LEN + c : PROMPT_LEN + c_end, :])
+        for c in range(0, PROMPT_LEN + GEN_STEPS, DECODE_CHUNK):
+            c_end = min(c + DECODE_CHUNK, PROMPT_LEN + GEN_STEPS)
+            ar_logits_c  = model.lm_head(hidden_ar[:,  c:c_end, :])
+            lar_logits_c = model.lm_head(hidden_lar[:, c:c_end, :])
             ar_p  = F.softmax(ar_logits_c,  dim=-1)
             lar_p = F.softmax(lar_logits_c, dim=-1)
             kl_chunks.append(
@@ -195,8 +196,8 @@ def rollout_fidelity(model, tokens):
             )
             agree_chunks.append((ar_p.argmax(dim=-1) == lar_p.argmax(dim=-1)).float().cpu())
 
-        kl    = torch.cat(kl_chunks,    dim=1)   # (N, GEN_STEPS)
-        agree = torch.cat(agree_chunks, dim=1)   # (N, GEN_STEPS)
+        kl    = torch.cat(kl_chunks,    dim=1)   # (N, PROMPT_LEN + GEN_STEPS)
+        agree = torch.cat(agree_chunks, dim=1)   # (N, PROMPT_LEN + GEN_STEPS)
         kl_per_step    = kl.mean(dim=0).numpy()
         agree_per_step = agree.mean(dim=0).numpy()
 
@@ -228,8 +229,8 @@ def latent_rollout_ce(model, tokens):
             np.stack([tokens[s : s + PROMPT_LEN + GEN_STEPS + 1].astype(np.int64) for s in starts])
         ).to(device)   # (N, PROMPT_LEN + GEN_STEPS + 1)
 
-        # targets: tokens PROMPT_LEN+1 .. PROMPT_LEN+GEN_STEPS for each sequence
-        targets = seq[:, PROMPT_LEN + 1 : PROMPT_LEN + 1 + GEN_STEPS]   # (N, GEN_STEPS)
+        # targets for all PROMPT_LEN+GEN_STEPS positions (token at t+1 for each position t)
+        targets = seq[:, 1 : PROMPT_LEN + GEN_STEPS + 1]   # (N, PROMPT_LEN+GEN_STEPS)
 
         # --- Standard AR baseline (teacher-forced): run up to ln_f only ---
         hidden_base = run_full_model_hidden(model, seq[:, :PROMPT_LEN + GEN_STEPS])  # (N, PROMPT_LEN+GEN_STEPS, n_embd)
@@ -257,24 +258,23 @@ def latent_rollout_ce(model, tokens):
         hidden_lar = run_decoder_hidden(model, dec_latents)   # (N, PROMPT_LEN+GEN_STEPS, n_embd)
         del dec_latents, lar_latents
 
-        # Apply lm_head and compute CE in DECODE_CHUNK-position chunks.
+        # Apply lm_head and compute CE in DECODE_CHUNK-position chunks, covering prompt + generated.
+        # Prompt positions (0..PROMPT_LEN-1) should show identical CE for base and LAR — sanity check.
         vocab_size = model.lm_head.weight.shape[0]
         base_ce_chunks = []
         lar_ce_chunks  = []
-        for c in range(0, GEN_STEPS, DECODE_CHUNK):
-            c_end  = min(c + DECODE_CHUNK, GEN_STEPS)
+        for c in range(0, PROMPT_LEN + GEN_STEPS, DECODE_CHUNK):
+            c_end  = min(c + DECODE_CHUNK, PROMPT_LEN + GEN_STEPS)
             tgts_c = targets[:, c:c_end].reshape(-1)
             base_ce_chunks.append(
                 F.cross_entropy(
-                    model.lm_head(hidden_base[:, PROMPT_LEN + c : PROMPT_LEN + c_end, :])
-                         .reshape(-1, vocab_size),
+                    model.lm_head(hidden_base[:, c:c_end, :]).reshape(-1, vocab_size),
                     tgts_c, reduction='none',
                 ).reshape(N_SEQUENCES, -1).cpu()
             )
             lar_ce_chunks.append(
                 F.cross_entropy(
-                    model.lm_head(hidden_lar[:, PROMPT_LEN + c : PROMPT_LEN + c_end, :])
-                        .reshape(-1, vocab_size),
+                    model.lm_head(hidden_lar[:, c:c_end, :]).reshape(-1, vocab_size),
                     tgts_c, reduction='none',
                 ).reshape(N_SEQUENCES, -1).cpu()
             )
@@ -383,9 +383,13 @@ def run():
     kl_per_step, agree_per_step = rollout_fidelity(model, tokens)
     elapsed = time.time() - t0
 
-    mean_kl    = float(kl_per_step.mean())
-    mean_agree = float(agree_per_step.mean())
-    print(f"\nMean KL(AR||LAR): {mean_kl:.4f}  |  Mean top-1 agreement: {mean_agree:.2%}  "
+    mean_kl_prompt = float(kl_per_step[:PROMPT_LEN].mean())
+    mean_kl_gen    = float(kl_per_step[PROMPT_LEN:].mean())
+    mean_agree_prompt = float(agree_per_step[:PROMPT_LEN].mean())
+    mean_agree_gen    = float(agree_per_step[PROMPT_LEN:].mean())
+    print(f"\nPrompt  — KL: {mean_kl_prompt:.4f}  agree: {mean_agree_prompt:.2%}  "
+          f"(expect ≈0 / ≈100% — sanity check)")
+    print(f"Generated — KL: {mean_kl_gen:.4f}  agree: {mean_agree_gen:.2%}  "
           f"({elapsed:.1f}s)")
 
     save_results('rollout_fidelity', {
@@ -400,11 +404,13 @@ def run():
             'layer_b':     layer_b,
         },
         'summary': {
-            'mean_kl':    mean_kl,
-            'mean_agree': mean_agree,
+            'mean_kl_prompt':    mean_kl_prompt,
+            'mean_kl_gen':       mean_kl_gen,
+            'mean_agree_prompt': mean_agree_prompt,
+            'mean_agree_gen':    mean_agree_gen,
         },
         'per_step': {
-            'kl':    kl_per_step.tolist(),
+            'kl':    kl_per_step.tolist(),    # length PROMPT_LEN + GEN_STEPS
             'agree': agree_per_step.tolist(),
         },
     })
@@ -464,10 +470,14 @@ def run():
     ce_per_step, base_ce_per_step = latent_rollout_ce(model, tokens)
     elapsed = time.time() - t0
 
-    mean_ce      = float(ce_per_step.mean())
-    mean_base_ce = float(base_ce_per_step.mean())
-    print(f"\nMean CE (LAR rollout): {mean_ce:.4f}  |  Mean CE (baseline): {mean_base_ce:.4f}  "
-          f"|  Delta: {mean_ce - mean_base_ce:+.4f}  ({elapsed:.1f}s)")
+    mean_ce_prompt    = float(ce_per_step[:PROMPT_LEN].mean())
+    mean_ce_gen       = float(ce_per_step[PROMPT_LEN:].mean())
+    mean_base_prompt  = float(base_ce_per_step[:PROMPT_LEN].mean())
+    mean_base_gen     = float(base_ce_per_step[PROMPT_LEN:].mean())
+    print(f"\nPrompt    — LAR CE: {mean_ce_prompt:.4f}  base: {mean_base_prompt:.4f}  "
+          f"delta: {mean_ce_prompt - mean_base_prompt:+.4f}  (expect ≈0 — sanity check)")
+    print(f"Generated — LAR CE: {mean_ce_gen:.4f}  base: {mean_base_gen:.4f}  "
+          f"delta: {mean_ce_gen - mean_base_gen:+.4f}  ({elapsed:.1f}s)")
 
     save_results('latent_rollout_ce', {
         'metric':    'latent_rollout_ce',
@@ -481,12 +491,15 @@ def run():
             'layer_b':     layer_b,
         },
         'summary': {
-            'mean_ce':      mean_ce,
-            'mean_base_ce': mean_base_ce,
-            'mean_delta':   mean_ce - mean_base_ce,
+            'mean_ce_prompt':   mean_ce_prompt,
+            'mean_ce_gen':      mean_ce_gen,
+            'mean_base_prompt': mean_base_prompt,
+            'mean_base_gen':    mean_base_gen,
+            'mean_delta_prompt': mean_ce_prompt - mean_base_prompt,
+            'mean_delta_gen':    mean_ce_gen    - mean_base_gen,
         },
         'per_step': {
-            'ce':      ce_per_step.tolist(),
+            'ce':      ce_per_step.tolist(),       # length PROMPT_LEN + GEN_STEPS
             'base_ce': base_ce_per_step.tolist(),
         },
     })
