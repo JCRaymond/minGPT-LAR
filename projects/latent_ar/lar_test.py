@@ -76,6 +76,7 @@ LAR_RESULTS_DIR = os.path.join(_DIR, 'lar_results')
 PROMPT_LEN   = 128
 GEN_STEPS    = 896   # prompt + gen_steps = 1024 (full context)
 N_SEQUENCES  = 30
+DECODE_CHUNK = 128   # positions per chunk when applying lm_head — keeps peak VRAM ~400 MB/chunk
 
 
 # ---------------------------------------------------------------------------
@@ -104,6 +105,23 @@ def run_decoder(model, x):
         x = block(x)
     x = model.transformer.ln_f(x)
     return model.lm_head(x)
+
+
+def run_decoder_hidden(model, x):
+    """Blocks h[layer_b:] + ln_f, without lm_head → hidden states (B, T, n_embd)."""
+    for block in model.transformer.h[layer_b:]:
+        x = block(x)
+    return model.transformer.ln_f(x)
+
+
+def run_full_model_hidden(model, idx):
+    """All 24 blocks + ln_f, without lm_head → hidden states (B, T, n_embd)."""
+    b, t = idx.size()
+    pos = torch.arange(0, t, dtype=torch.long, device=idx.device).unsqueeze(0)
+    x = model.transformer.drop(model.transformer.wte(idx) + model.transformer.wpe(pos))
+    for block in model.transformer.h:
+        x = block(x)
+    return model.transformer.ln_f(x)
 
 
 def load_lar_model():
@@ -135,12 +153,8 @@ def rollout_fidelity(model, tokens):
             np.stack([tokens[s : s + PROMPT_LEN + GEN_STEPS].astype(np.int64) for s in starts])
         ).to(device)   # (N, PROMPT_LEN + GEN_STEPS)
 
-        # --- Standard AR (teacher-forced) ---
-        ar_logits, _ = model(seq)   # (N, PROMPT_LEN + GEN_STEPS, vocab)
-        ar_probs = F.softmax(
-            ar_logits[:, PROMPT_LEN : PROMPT_LEN + GEN_STEPS, :], dim=-1,
-        )   # (N, GEN_STEPS, vocab)
-        del ar_logits
+        # --- Standard AR (teacher-forced): run up to ln_f, hold hidden states only ---
+        hidden_ar = run_full_model_hidden(model, seq)   # (N, PROMPT_LEN+GEN_STEPS, n_embd)
 
         # --- LAR rollout ---
         h_a_prompt = run_encoder(model, seq[:, :PROMPT_LEN])  # (N, PROMPT_LEN, n_embd)
@@ -160,22 +174,31 @@ def rollout_fidelity(model, tokens):
             if (step + 1) % log_every == 0:
                 print(f"  [step {step+1}/{GEN_STEPS}]")
 
-        # dec_latents: (N, PROMPT_LEN + GEN_STEPS, n_embd)
         # dec_latents[K+s] = h_b[K+s] ≈ h_a[K+s+1] — correct decoder input at position K+s.
-        # Decode once: causal attention means logits[t] is identical to what
-        # we'd get decoding dec_latents[:t+1] alone, so all steps are covered.
-        lar_logits = run_decoder(model, dec_latents)   # (N, PROMPT_LEN + GEN_STEPS, vocab)
-        lar_probs = F.softmax(
-            lar_logits[:, PROMPT_LEN : PROMPT_LEN + GEN_STEPS, :], dim=-1,
-        )   # (N, GEN_STEPS, vocab)
-        del lar_logits
+        # Run decoder blocks + ln_f only; apply lm_head in chunks below.
+        hidden_lar = run_decoder_hidden(model, dec_latents)   # (N, PROMPT_LEN+GEN_STEPS, n_embd)
+        del dec_latents, lar_latents
 
-        kl = (ar_probs * (ar_probs.clamp(min=1e-10).log()
-                          - lar_probs.clamp(min=1e-10).log())).sum(dim=-1)  # (N, GEN_STEPS)
-        agree = (ar_probs.argmax(dim=-1) == lar_probs.argmax(dim=-1)).float()  # (N, GEN_STEPS)
+        # Apply lm_head in DECODE_CHUNK-position chunks to avoid materialising the
+        # full (N, GEN_STEPS, vocab) tensors for both AR and LAR simultaneously.
+        kl_chunks    = []
+        agree_chunks = []
+        for c in range(0, GEN_STEPS, DECODE_CHUNK):
+            c_end = min(c + DECODE_CHUNK, GEN_STEPS)
+            ar_logits_c  = model.lm_head(hidden_ar[:, PROMPT_LEN + c : PROMPT_LEN + c_end, :])
+            lar_logits_c = model.lm_head(hidden_lar[:, PROMPT_LEN + c : PROMPT_LEN + c_end, :])
+            ar_p  = F.softmax(ar_logits_c,  dim=-1)
+            lar_p = F.softmax(lar_logits_c, dim=-1)
+            kl_chunks.append(
+                (ar_p * (ar_p.clamp(min=1e-10).log() - lar_p.clamp(min=1e-10).log()))
+                .sum(dim=-1).cpu()
+            )
+            agree_chunks.append((ar_p.argmax(dim=-1) == lar_p.argmax(dim=-1)).float().cpu())
 
-        kl_per_step    = kl.mean(dim=0).cpu().numpy()     # (GEN_STEPS,)
-        agree_per_step = agree.mean(dim=0).cpu().numpy()  # (GEN_STEPS,)
+        kl    = torch.cat(kl_chunks,    dim=1)   # (N, GEN_STEPS)
+        agree = torch.cat(agree_chunks, dim=1)   # (N, GEN_STEPS)
+        kl_per_step    = kl.mean(dim=0).numpy()
+        agree_per_step = agree.mean(dim=0).numpy()
 
     return kl_per_step, agree_per_step
 
@@ -208,14 +231,8 @@ def latent_rollout_ce(model, tokens):
         # targets: tokens PROMPT_LEN+1 .. PROMPT_LEN+GEN_STEPS for each sequence
         targets = seq[:, PROMPT_LEN + 1 : PROMPT_LEN + 1 + GEN_STEPS]   # (N, GEN_STEPS)
 
-        # --- Standard AR baseline (teacher-forced) ---
-        base_logits, _ = model(seq[:, : PROMPT_LEN + GEN_STEPS])   # (N, PROMPT_LEN+GEN_STEPS, vocab)
-        base_ce_per_step = F.cross_entropy(
-            base_logits[:, PROMPT_LEN : PROMPT_LEN + GEN_STEPS, :].reshape(-1, base_logits.shape[-1]),
-            targets.reshape(-1),
-            reduction='none',
-        ).reshape(N_SEQUENCES, GEN_STEPS).mean(dim=0).cpu().numpy()   # (GEN_STEPS,)
-        del base_logits
+        # --- Standard AR baseline (teacher-forced): run up to ln_f only ---
+        hidden_base = run_full_model_hidden(model, seq[:, :PROMPT_LEN + GEN_STEPS])  # (N, PROMPT_LEN+GEN_STEPS, n_embd)
 
         # --- LAR rollout ---
         h_a_prompt = run_encoder(model, seq[:, :PROMPT_LEN])  # (N, PROMPT_LEN, n_embd)
@@ -235,16 +252,35 @@ def latent_rollout_ce(model, tokens):
             if (step + 1) % log_every == 0:
                 print(f"  [step {step+1}/{GEN_STEPS}]")
 
-        # dec_latents: (N, PROMPT_LEN + GEN_STEPS, n_embd)
         # dec_latents[K+s] = h_b[K+s] ≈ h_a[K+s+1] — correct decoder input at position K+s.
-        # Decode once; evaluate CE at positions PROMPT_LEN..PROMPT_LEN+GEN_STEPS-1
-        lar_logits = run_decoder(model, dec_latents)   # (N, PROMPT_LEN + GEN_STEPS, vocab)
-        ce_per_step = F.cross_entropy(
-            lar_logits[:, PROMPT_LEN : PROMPT_LEN + GEN_STEPS, :].reshape(-1, lar_logits.shape[-1]),
-            targets.reshape(-1),
-            reduction='none',
-        ).reshape(N_SEQUENCES, GEN_STEPS).mean(dim=0).cpu().numpy()   # (GEN_STEPS,)
-        del lar_logits
+        # Run decoder blocks + ln_f only; apply lm_head in chunks below.
+        hidden_lar = run_decoder_hidden(model, dec_latents)   # (N, PROMPT_LEN+GEN_STEPS, n_embd)
+        del dec_latents, lar_latents
+
+        # Apply lm_head and compute CE in DECODE_CHUNK-position chunks.
+        vocab_size = model.lm_head.weight.shape[0]
+        base_ce_chunks = []
+        lar_ce_chunks  = []
+        for c in range(0, GEN_STEPS, DECODE_CHUNK):
+            c_end  = min(c + DECODE_CHUNK, GEN_STEPS)
+            tgts_c = targets[:, c:c_end].reshape(-1)
+            base_ce_chunks.append(
+                F.cross_entropy(
+                    model.lm_head(hidden_base[:, PROMPT_LEN + c : PROMPT_LEN + c_end, :])
+                         .reshape(-1, vocab_size),
+                    tgts_c, reduction='none',
+                ).reshape(N_SEQUENCES, -1).cpu()
+            )
+            lar_ce_chunks.append(
+                F.cross_entropy(
+                    model.lm_head(hidden_lar[:, PROMPT_LEN + c : PROMPT_LEN + c_end, :])
+                        .reshape(-1, vocab_size),
+                    tgts_c, reduction='none',
+                ).reshape(N_SEQUENCES, -1).cpu()
+            )
+
+        base_ce_per_step = torch.cat(base_ce_chunks, dim=1).mean(dim=0).numpy()
+        ce_per_step      = torch.cat(lar_ce_chunks,  dim=1).mean(dim=0).numpy()
 
     mean_ce      = ce_per_step.mean()
     mean_base_ce = base_ce_per_step.mean()
