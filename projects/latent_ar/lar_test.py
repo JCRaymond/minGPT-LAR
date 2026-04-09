@@ -48,6 +48,7 @@ Run from the repo root:
     python -m projects.latent_ar.lar_test
 """
 
+import argparse
 import json
 import os
 import time
@@ -72,6 +73,7 @@ layer_b     = 18
 ckpt_path   = os.path.join(_DIR, 'alarm_gen_checkpoint.pt')
 
 LAR_RESULTS_DIR = os.path.join(_DIR, 'lar_results')
+ema_stats_path  = os.path.join(_DIR, 'alarm_ema_stats.pt')
 
 # Shared rollout config (applies to all metrics)
 PROMPT_LEN   = 128
@@ -125,6 +127,24 @@ def run_full_model_hidden(model, idx):
     return model.transformer.ln_f(x)
 
 
+def load_ema_stats():
+    return torch.load(ema_stats_path, map_location=device, weights_only=True)
+
+
+def apply_ema_correction(latent, ema_stats):
+    """Map h_b distribution to h_a distribution using bias-corrected EMA stats.
+    latent: (B, 1, n_embd)
+    """
+    decay  = 0.999
+    step   = int(ema_stats['ema_step'])
+    c      = 1 - decay ** step
+    mean_a = ema_stats['ema_mean_a'] / c
+    mean_b = ema_stats['ema_mean_b'] / c
+    mag_a  = ema_stats['ema_mag_a']  / c
+    mag_b  = ema_stats['ema_mag_b']  / c
+    return (latent - mean_b) * (mag_a / mag_b) + mean_a
+
+
 def load_lar_model():
     model = GPT.from_pretrained(model_type)
     model.load_state_dict(torch.load(ckpt_path, map_location=device, weights_only=True))
@@ -136,7 +156,7 @@ def load_lar_model():
 # ---------------------------------------------------------------------------
 # Rollout fidelity
 
-def rollout_fidelity(model, tokens):
+def rollout_fidelity(model, tokens, ema_stats=None):
     """
     Compare LAR rollout vs. standard AR output distributions over gen_steps
     steps from a prompt of length prompt_len.
@@ -170,6 +190,8 @@ def rollout_fidelity(model, tokens):
         for step in range(GEN_STEPS):
             lar_out    = run_lar_core(model, lar_latents)
             new_latent = lar_out[:, -1:, :]   # h_b[PROMPT_LEN+step] ≈ h_a[PROMPT_LEN+step+1]
+            if ema_stats is not None:
+                new_latent = apply_ema_correction(new_latent, ema_stats)
             lar_latents = torch.cat([lar_latents, new_latent], dim=1)
             dec_latents = torch.cat([dec_latents, new_latent], dim=1)
             if (step + 1) % log_every == 0:
@@ -208,7 +230,7 @@ def rollout_fidelity(model, tokens):
 # ---------------------------------------------------------------------------
 # Latent rollout CE
 
-def latent_rollout_ce(model, tokens):
+def latent_rollout_ce(model, tokens, ema_stats=None):
     """
     Encode a prompt, run the LAR core autoregressively for gen_steps steps,
     decode the full latent sequence once, and measure CE at each rollout position.
@@ -249,6 +271,8 @@ def latent_rollout_ce(model, tokens):
         for step in range(GEN_STEPS):
             lar_out    = run_lar_core(model, lar_latents)
             new_latent = lar_out[:, -1:, :]   # h_b[PROMPT_LEN+step] ≈ h_a[PROMPT_LEN+step+1]
+            if ema_stats is not None:
+                new_latent = apply_ema_correction(new_latent, ema_stats)
             lar_latents = torch.cat([lar_latents, new_latent], dim=1)
             dec_latents = torch.cat([dec_latents, new_latent], dim=1)
             if (step + 1) % log_every == 0:
@@ -294,7 +318,7 @@ def latent_rollout_ce(model, tokens):
 # ---------------------------------------------------------------------------
 # Latent trajectory divergence
 
-def latent_trajectory_divergence(model, tokens):
+def latent_trajectory_divergence(model, tokens, ema_stats=None):
     """
     Measure how quickly the LAR rollout drifts from the encoder's ground-truth
     latent trajectory.
@@ -332,6 +356,8 @@ def latent_trajectory_divergence(model, tokens):
         for step in range(GEN_STEPS):
             lar_out   = run_lar_core(model, latents)
             predicted = lar_out[:, -1:, :]   # (N, 1, n_embd)
+            if ema_stats is not None:
+                predicted = apply_ema_correction(predicted, ema_stats)
             gt        = ground_truth[:, PROMPT_LEN + step : PROMPT_LEN + step + 1, :]
 
             pred_f = predicted.float()
@@ -370,6 +396,14 @@ def save_results(name, results):
 # ---------------------------------------------------------------------------
 
 def run():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--use-correction', action='store_true')
+    args = parser.parse_args()
+
+    ema_stats = load_ema_stats() if args.use_correction else None
+    if ema_stats is not None:
+        print(f"EMA correction enabled (step={int(ema_stats['ema_step'])})")
+
     if device == 'cpu':
         torch.set_num_threads(10)
 
@@ -381,7 +415,7 @@ def run():
     print(f"prompt_len={PROMPT_LEN}, gen_steps={GEN_STEPS}, "
           f"n_sequences={N_SEQUENCES}\n")
     t0 = time.time()
-    kl_per_step, agree_per_step = rollout_fidelity(model, tokens)
+    kl_per_step, agree_per_step = rollout_fidelity(model, tokens, ema_stats)
     elapsed = time.time() - t0
 
     mean_kl_prompt = float(kl_per_step[:PROMPT_LEN].mean())
@@ -398,11 +432,12 @@ def run():
         'timestamp':  time.strftime('%Y%m%d_%H%M%S'),
         'ckpt_path':  ckpt_path,
         'config': {
-            'prompt_len':  PROMPT_LEN,
-            'gen_steps':   GEN_STEPS,
-            'n_sequences': N_SEQUENCES,
-            'layer_a':     layer_a,
-            'layer_b':     layer_b,
+            'prompt_len':     PROMPT_LEN,
+            'gen_steps':      GEN_STEPS,
+            'n_sequences':    N_SEQUENCES,
+            'layer_a':        layer_a,
+            'layer_b':        layer_b,
+            'use_correction': ema_stats is not None,
         },
         'summary': {
             'mean_kl_prompt':    mean_kl_prompt,
@@ -422,7 +457,7 @@ def run():
           f"n_sequences={N_SEQUENCES}\n")
     t0 = time.time()
     l2_per_step, mean_magnitude, pred_norm_per_step, gt_norm_per_step = \
-        latent_trajectory_divergence(model, tokens)
+        latent_trajectory_divergence(model, tokens, ema_stats)
     elapsed = time.time() - t0
 
     mean_l2       = float(l2_per_step.mean())
@@ -439,11 +474,12 @@ def run():
         'timestamp': time.strftime('%Y%m%d_%H%M%S'),
         'ckpt_path': ckpt_path,
         'config': {
-            'prompt_len':  PROMPT_LEN,
-            'gen_steps':   GEN_STEPS,
-            'n_sequences': N_SEQUENCES,
-            'layer_a':     layer_a,
-            'layer_b':     layer_b,
+            'prompt_len':     PROMPT_LEN,
+            'gen_steps':      GEN_STEPS,
+            'n_sequences':    N_SEQUENCES,
+            'layer_a':        layer_a,
+            'layer_b':        layer_b,
+            'use_correction': ema_stats is not None,
         },
         'summary': {
             'mean_l2':             mean_l2,
@@ -468,7 +504,7 @@ def run():
     print(f"prompt_len={PROMPT_LEN}, gen_steps={GEN_STEPS}, "
           f"n_sequences={N_SEQUENCES}\n")
     t0 = time.time()
-    ce_per_step, base_ce_per_step = latent_rollout_ce(model, tokens)
+    ce_per_step, base_ce_per_step = latent_rollout_ce(model, tokens, ema_stats)
     elapsed = time.time() - t0
 
     mean_ce_prompt    = float(ce_per_step[:PROMPT_LEN].mean())
@@ -485,11 +521,12 @@ def run():
         'timestamp': time.strftime('%Y%m%d_%H%M%S'),
         'ckpt_path': ckpt_path,
         'config': {
-            'prompt_len':  PROMPT_LEN,
-            'gen_steps':   GEN_STEPS,
-            'n_sequences': N_SEQUENCES,
-            'layer_a':     layer_a,
-            'layer_b':     layer_b,
+            'prompt_len':     PROMPT_LEN,
+            'gen_steps':      GEN_STEPS,
+            'n_sequences':    N_SEQUENCES,
+            'layer_a':        layer_a,
+            'layer_b':        layer_b,
+            'use_correction': ema_stats is not None,
         },
         'summary': {
             'mean_ce_prompt':   mean_ce_prompt,
