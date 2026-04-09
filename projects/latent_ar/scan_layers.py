@@ -50,9 +50,11 @@ def _run_paths(mode):
     """
     Return (latent_ar_ckpt, checkpoint_path, plot_prefix) for the given mode.
 
-    orig — all runs share a single checkpoint and overwrite the same plots,
+    orig  — all runs share a single checkpoint and overwrite the same plots,
            since the base model never changes.
-    lar  — each run gets its own timestamped subdirectory so results from
+    lar   — each run gets its own timestamped subdirectory so results from
+           different training stages can be compared.
+    alarm — each run gets its own timestamped subdirectory so results from
            different training stages can be compared.
     """
     os.makedirs(RESULTS_DIR, exist_ok=True)
@@ -71,8 +73,17 @@ def _run_paths(mode):
             os.path.join(run_dir, 'checkpoint.npz'),
             os.path.join(run_dir, 'lar'),
         )
+    elif mode == 'alarm':
+        timestamp = time.strftime('%Y%m%d_%H%M%S')
+        run_dir = os.path.join(RESULTS_DIR, f'layer_scan_alarm_{timestamp}')
+        os.makedirs(run_dir, exist_ok=True)
+        return (
+            os.path.join(_DIR, 'alarm_gen_checkpoint.pt'),
+            os.path.join(run_dir, 'checkpoint.npz'),
+            os.path.join(run_dir, 'lar'),
+        )
     else:
-        print(f"ERROR: unknown mode '{mode}'. Use 'orig' or 'lar'.")
+        print(f"ERROR: unknown mode '{mode}'. Use 'orig', 'lar', or 'alarm'.")
         sys.exit(1)
 
 # -----------------------------------------------------------------------------
@@ -461,8 +472,8 @@ def regen():
 
 
 if __name__ == '__main__':
-    if len(sys.argv) != 2 or sys.argv[1] not in ('orig', 'lar', 'regen'):
-        print("Usage: python -m projects.latent_ar.scan_layers [orig|lar|regen]")
+    if len(sys.argv) != 2 or sys.argv[1] not in ('orig', 'lar', 'alarm', 'regen'):
+        print("Usage: python -m projects.latent_ar.scan_layers [orig|lar|alarm|regen]")
         sys.exit(1)
     if sys.argv[1] == 'regen':
         regen()
