@@ -74,6 +74,8 @@ disc_ckpt_load_path = os.path.join(_DIR, 'alarm_disc_checkpoint.pt')
 disc_ckpt_save_dir  = DATA_DIR
 llm_opt_ckpt_path   = os.path.join(DATA_DIR, 'alarm_llm_opt.pt')
 disc_opt_ckpt_path  = os.path.join(DATA_DIR, 'alarm_disc_opt.pt')
+ema_decay           = 0.999
+ema_ckpt_load_path  = os.path.join(_DIR, 'alarm_ema_stats.pt')
 
 
 # ---------------------------------------------------------------------------
@@ -183,6 +185,22 @@ def train():
         print(f"Resuming discriminator optimizer from {disc_opt_ckpt_path}")
         disc_optimizer.load_state_dict(torch.load(disc_opt_ckpt_path, map_location=device, weights_only=True))
 
+    # --- EMA distribution statistics ---
+    ema_mean_a = torch.zeros(n_embd, device=device)
+    ema_mean_b = torch.zeros(n_embd, device=device)
+    ema_mag_a  = torch.tensor(0.0, device=device)
+    ema_mag_b  = torch.tensor(0.0, device=device)
+    ema_step   = 0
+
+    if os.path.exists(ema_ckpt_load_path):
+        print(f"Resuming EMA stats from {ema_ckpt_load_path}")
+        s = torch.load(ema_ckpt_load_path, map_location=device, weights_only=True)
+        ema_mean_a = s['ema_mean_a']
+        ema_mean_b = s['ema_mean_b']
+        ema_mag_a  = s['ema_mag_a']
+        ema_mag_b  = s['ema_mag_b']
+        ema_step   = int(s['ema_step'])
+
     # --- Training loop ---
     data_iter = iter(loader)
     t0 = time.time()
@@ -191,6 +209,7 @@ def train():
         print(f'Epoch: {epoch}')
         ep_gen_ckpt  = os.path.join(gen_ckpt_save_dir,  f'alarm_gen_checkpoint_{epoch}.pt')
         ep_disc_ckpt = os.path.join(disc_ckpt_save_dir, f'alarm_disc_checkpoint_{epoch}.pt')
+        ep_ema_ckpt  = os.path.join(DATA_DIR,            f'alarm_ema_stats_{epoch}.pt')
 
         for iter_num in range(1, max_iters + 1):
             try:
@@ -209,6 +228,18 @@ def train():
             h_b = h_b_buf['act']
             h_a_flat = h_a.reshape(-1, n_embd)     # (B*T, n_embd)
             h_b_flat = h_b.reshape(-1, n_embd)
+
+            # --- EMA update ---
+            with torch.no_grad():
+                batch_mean_a = h_a_flat.detach().mean(0)
+                batch_mean_b = h_b_flat.detach().mean(0)
+                batch_mag_a  = h_a_flat.detach().norm(dim=1).mean()
+                batch_mag_b  = h_b_flat.detach().norm(dim=1).mean()
+                ema_mean_a = ema_decay * ema_mean_a + (1 - ema_decay) * batch_mean_a
+                ema_mean_b = ema_decay * ema_mean_b + (1 - ema_decay) * batch_mean_b
+                ema_mag_a  = ema_decay * ema_mag_a  + (1 - ema_decay) * batch_mag_a
+                ema_mag_b  = ema_decay * ema_mag_b  + (1 - ema_decay) * batch_mag_b
+                ema_step  += 1
 
             # --- Discriminator update (n_critic steps on same activations) ---
             for _ in range(n_critic):
@@ -293,12 +324,18 @@ def train():
                 torch.save(discriminator.state_dict(), ep_disc_ckpt)
                 torch.save(llm_optimizer.state_dict(),  llm_opt_ckpt_path)
                 torch.save(disc_optimizer.state_dict(), disc_opt_ckpt_path)
+                torch.save({'ema_mean_a': ema_mean_a, 'ema_mean_b': ema_mean_b,
+                            'ema_mag_a': ema_mag_a, 'ema_mag_b': ema_mag_b,
+                            'ema_step': torch.tensor(ema_step)}, ep_ema_ckpt)
                 print(f"Checkpoints saved -> {ep_gen_ckpt}, {ep_disc_ckpt}")
 
         torch.save(model.state_dict(), ep_gen_ckpt)
         torch.save(discriminator.state_dict(), ep_disc_ckpt)
         torch.save(llm_optimizer.state_dict(),  llm_opt_ckpt_path)
         torch.save(disc_optimizer.state_dict(), disc_opt_ckpt_path)
+        torch.save({'ema_mean_a': ema_mean_a, 'ema_mean_b': ema_mean_b,
+                    'ema_mag_a': ema_mag_a, 'ema_mag_b': ema_mag_b,
+                    'ema_step': torch.tensor(ema_step)}, ep_ema_ckpt)
         print(f"Epoch {epoch} complete. Checkpoints: {ep_gen_ckpt}, {ep_disc_ckpt}")
 
     handle_a.remove()
