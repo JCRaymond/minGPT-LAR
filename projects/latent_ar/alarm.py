@@ -72,6 +72,8 @@ gen_ckpt_load_path  = os.path.join(_DIR, 'alarm_gen_checkpoint.pt')
 gen_ckpt_save_dir   = DATA_DIR
 disc_ckpt_load_path = os.path.join(_DIR, 'alarm_disc_checkpoint.pt')
 disc_ckpt_save_dir  = DATA_DIR
+llm_opt_ckpt_path   = os.path.join(DATA_DIR, 'alarm_llm_opt.pt')
+disc_opt_ckpt_path  = os.path.join(DATA_DIR, 'alarm_disc_opt.pt')
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +175,13 @@ def train():
     )
     llm_optimizer  = model.configure_optimizers(train_cfg)
     disc_optimizer = torch.optim.Adam(discriminator.parameters(), lr=disc_lr, betas=disc_betas)
+
+    if os.path.exists(llm_opt_ckpt_path):
+        print(f"Resuming LLM optimizer from {llm_opt_ckpt_path}")
+        llm_optimizer.load_state_dict(torch.load(llm_opt_ckpt_path, map_location=device, weights_only=True))
+    if os.path.exists(disc_opt_ckpt_path):
+        print(f"Resuming discriminator optimizer from {disc_opt_ckpt_path}")
+        disc_optimizer.load_state_dict(torch.load(disc_opt_ckpt_path, map_location=device, weights_only=True))
 
     # --- Training loop ---
     data_iter = iter(loader)
@@ -282,10 +291,14 @@ def train():
             if iter_num % ckpt_interval == 0:
                 torch.save(model.state_dict(), ep_gen_ckpt)
                 torch.save(discriminator.state_dict(), ep_disc_ckpt)
+                torch.save(llm_optimizer.state_dict(),  llm_opt_ckpt_path)
+                torch.save(disc_optimizer.state_dict(), disc_opt_ckpt_path)
                 print(f"Checkpoints saved -> {ep_gen_ckpt}, {ep_disc_ckpt}")
 
         torch.save(model.state_dict(), ep_gen_ckpt)
         torch.save(discriminator.state_dict(), ep_disc_ckpt)
+        torch.save(llm_optimizer.state_dict(),  llm_opt_ckpt_path)
+        torch.save(disc_optimizer.state_dict(), disc_opt_ckpt_path)
         print(f"Epoch {epoch} complete. Checkpoints: {ep_gen_ckpt}, {ep_disc_ckpt}")
 
     handle_a.remove()
