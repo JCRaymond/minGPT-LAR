@@ -68,7 +68,8 @@ model_type  = 'gpt2-medium'
 device      = 'cuda' if torch.cuda.is_available() else 'cpu'
 layer_a     = 6
 layer_b     = 18
-ckpt_path   = os.path.join(_DIR, 'latent_ar_checkpoint.pt')
+#ckpt_path   = os.path.join(_DIR, 'latent_ar_checkpoint.pt')
+ckpt_path   = os.path.join(_DIR, 'alarm_gen_checkpoint.pt')
 
 LAR_RESULTS_DIR = os.path.join(_DIR, 'lar_results')
 
