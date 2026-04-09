@@ -50,7 +50,7 @@ device         = 'cuda' if torch.cuda.is_available() else 'cpu'
 layer_a        = 6
 layer_b        = 18
 lambda_penalty = 8e-3
-lambda_adv_target = 0.2   # start conservative; tune up if adv/ce ratio < 0.01
+lambda_adv_target = 0.15   # start conservative; tune up if adv/ce ratio < 0.01
 lambda_adv_ramp = False
 block_size     = 1024
 batch_size     = 12 if device == 'cuda' else 2
@@ -63,8 +63,8 @@ grad_norm_clip = 1.0
 log_interval   = 1
 ckpt_interval  = 100
 disc_lr        = 1e-4
-disc_betas     = (0.2, 0.999)
-n_critic       = 3    # discriminator updates per LLM update
+disc_betas     = (0.2, 0.9)
+n_critic       = 2    # discriminator updates per LLM update
 n_embd         = 1024
 DATA_DIR       = '/root'
 
