@@ -49,8 +49,8 @@ model_type     = 'gpt2-medium'
 device         = 'cuda' if torch.cuda.is_available() else 'cpu'
 layer_a        = 6
 layer_b        = 18
-lambda_penalty = 8e-3
-lambda_adv_target = 0.15   # start conservative; tune up if adv/ce ratio < 0.01
+lambda_penalty = 6e-3
+lambda_adv_target = 0.5   # start conservative; tune up if adv/ce ratio < 0.01
 lambda_adv_ramp = False
 block_size     = 1024
 batch_size     = 12 if device == 'cuda' else 2
@@ -64,7 +64,7 @@ log_interval   = 1
 ckpt_interval  = 100
 disc_lr        = 1e-4
 disc_betas     = (0.2, 0.9)
-n_critic       = 2    # discriminator updates per LLM update
+n_critic       = 4    # discriminator updates per LLM update
 n_embd         = 1024
 DATA_DIR       = '/root'
 
@@ -246,7 +246,7 @@ def train():
                 disc_optimizer.zero_grad()
                 d_real = discriminator(h_a_flat.detach())   # (B*T, 1)
                 d_fake = discriminator(h_b_flat.detach())
-                disc_loss = (d_real - 1).pow(2).mean() + d_fake.pow(2).mean()
+                disc_loss = 3*(d_real - 1).pow(2).mean() + d_fake.pow(2).mean()
                 disc_loss.backward()
                 disc_optimizer.step()
 
@@ -290,7 +290,8 @@ def train():
                 t0 = t1
 
                 with torch.no_grad():
-                    disc_acc = ((d_real > 0.5).float().mean().item() + (d_fake < 0.5).float().mean().item())/2
+                    disc_real_acc = d_real.mean().item()
+                    disc_fake_acc = d_fake.mean().item()
 
                 penalty_ratio = (lambda_penalty * penalty.item()) / (ce_loss.item() + 1e-8)
                 adv_ratio     = (lambda_adv * gen_adv_loss.item()) / (ce_loss.item() + 1e-8)
@@ -313,7 +314,7 @@ def train():
                     f"penalty {penalty.item():.4f} | "
                     f"gen_adv {gen_adv_loss.item():.4f} | "
                     f"disc_loss {disc_loss.item():.4f} | "
-                    f"disc_acc {disc_acc:.2%} | "
+                    f"disc_acc {disc_fake_acc:.2f}/{disc_real_acc:.2f} | "
                     f"{ms_per_iter:.0f}ms/iter"
                     f" [penalty/ce: {penalty_ratio:.2f}] [adv/ce: {adv_ratio:.2f}]"
                     + suffix

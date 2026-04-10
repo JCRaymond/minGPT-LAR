@@ -1,0 +1,24 @@
+{
+  "results": {
+    "timestamp": "20260410_134924",
+    "ckpt_path": "/workspace/minGPT-LAR/projects/latent_ar/alarm_gen_checkpoint.pt",
+    "config": {
+      "n_batches": 100,
+      "batch_size": 12,
+      "block_size": 1024,
+      "layer_a": 6,
+      "layer_b": 18
+    },
+    "lar_ce": 3.105002312660217,
+    "lar_ppl": 22.309270568978686,
+    "norm_a": 76.75252540588379,
+    "norm_b": 76.77263671875,
+    "l2": 4.756370987892151,
+    "mean_bias": 1.633481740951538,
+    "bias_frac": 0.3434302633477792,
+    "bypass_ce": 3.024339773654938,
+    "shift_ce": 2.9144112730026244,
+    "base_ce": 3.1027757811546324,
+    "base_ppl": 22.259653532635355
+  }
+}
