@@ -50,21 +50,21 @@ device         = 'cuda' if torch.cuda.is_available() else 'cpu'
 layer_a        = 6
 layer_b        = 18
 lambda_penalty = 6e-3
-lambda_adv_target = 0.5   # start conservative; tune up if adv/ce ratio < 0.01
+lambda_adv_target = 0.6   # start conservative; tune up if adv/ce ratio < 0.01
 lambda_adv_ramp = False
 block_size     = 1024
 batch_size     = 12 if device == 'cuda' else 2
 learning_rate  = 3e-5
 weight_decay   = 0.075
 betas          = (0.9, 0.95)
-max_iters      = 1000
+max_iters      = 2000
 epochs         = 8
 grad_norm_clip = 1.0
 log_interval   = 1
 ckpt_interval  = 100
 disc_lr        = 1e-4
 disc_betas     = (0.2, 0.9)
-n_critic       = 6    # discriminator updates per LLM update
+n_critic       = 20    # discriminator updates per LLM update
 n_embd         = 1024
 DATA_DIR       = '/root'
 
@@ -246,7 +246,7 @@ def train():
                 disc_optimizer.zero_grad()
                 d_real = discriminator(h_a_flat.detach())   # (B*T, 1)
                 d_fake = discriminator(h_b_flat.detach())
-                disc_loss = 3*(d_real - 1).pow(2).mean() + d_fake.pow(2).mean()
+                disc_loss = (d_real - 1).pow(2).mean() + d_fake.pow(2).mean()
                 disc_loss.backward()
                 disc_optimizer.step()
 
