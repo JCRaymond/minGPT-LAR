@@ -64,7 +64,7 @@ log_interval   = 1
 ckpt_interval  = 100
 disc_lr        = 1e-4
 disc_betas     = (0.2, 0.9)
-n_critic       = 4    # discriminator updates per LLM update
+n_critic       = 6    # discriminator updates per LLM update
 n_embd         = 1024
 DATA_DIR       = '/root'
 
@@ -290,8 +290,9 @@ def train():
                 t0 = t1
 
                 with torch.no_grad():
-                    disc_real_acc = d_real.mean().item()
-                    disc_fake_acc = d_fake.mean().item()
+                    threshold = (d_real.mean().item() + d_fake.mean().item())/2
+                    disc_real_acc = (d_real > threshold).float().mean().item()
+                    disc_fake_acc = (d_fake < threshold).float().mean().item()
 
                 penalty_ratio = (lambda_penalty * penalty.item()) / (ce_loss.item() + 1e-8)
                 adv_ratio     = (lambda_adv * gen_adv_loss.item()) / (ce_loss.item() + 1e-8)
@@ -314,7 +315,7 @@ def train():
                     f"penalty {penalty.item():.4f} | "
                     f"gen_adv {gen_adv_loss.item():.4f} | "
                     f"disc_loss {disc_loss.item():.4f} | "
-                    f"disc_acc {disc_fake_acc:.2f}/{disc_real_acc:.2f} | "
+                    f"disc_acc {disc_fake_acc:.2%}/{disc_real_acc:.2%} | "
                     f"{ms_per_iter:.0f}ms/iter"
                     f" [penalty/ce: {penalty_ratio:.2f}] [adv/ce: {adv_ratio:.2f}]"
                     + suffix
