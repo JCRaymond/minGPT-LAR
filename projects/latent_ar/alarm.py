@@ -64,7 +64,7 @@ log_interval   = 1
 ckpt_interval  = 100
 disc_lr        = 1e-4
 disc_betas     = (0.2, 0.9)
-n_critic       = 20    # discriminator updates per LLM update
+n_critic       = 15    # discriminator updates per LLM update
 n_embd         = 1024
 DATA_DIR       = '/root'
 
